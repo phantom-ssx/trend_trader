@@ -1,0 +1,14 @@
+starting_balance = 10000.0
+base_currency = "USDT"
+
+[data]
+parquet_path = "data/clean/okx/BTC-USDT-SWAP/1m.parquet"
+exchange = "OKX"
+inst_id = "BTC-USDT-SWAP"
+bar = "1m"
+
+[strategy]
+trade_size = 0.001
+fast_period = 10
+slow_period = 30
+

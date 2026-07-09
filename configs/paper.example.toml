@@ -1,0 +1,6 @@
+inst_id = "BTC-USDT-SWAP"
+instrument_family = "BTC-USDT"
+bar = "1m"
+trade_size = 0.001
+demo = true
+margin_mode = "cross"
