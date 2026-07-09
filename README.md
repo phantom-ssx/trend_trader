@@ -72,7 +72,7 @@ uv run nt-okx-backtest --config configs/backtest.example.toml
 对比 MA 交叉过滤策略的整体或月度表现：
 
 ```bash
-uv run nt-okx-evaluate-filters \
+uv run python scripts/evaluate_filters.py \
   --config configs/backtest.eth-2026.toml \
   --mode monthly \
   --format table
@@ -83,9 +83,34 @@ uv run nt-okx-evaluate-filters \
 ```bash
 uv run nt-okx-backtest \
   --config configs/backtest.eth-2026.toml \
-  --engine nautilus \
   --resample 1h \
-  --nautilus-strategy best-filter \
+  --strategy best-filter \
+  --sizing all-in
+```
+
+默认会跳过名义金额低于 `50 USDT` 的小额调仓订单；可用
+`--min-order-notional 0` 关闭过滤，或传其它数值调整阈值。
+
+如需查看 Nautilus 回测的订单明细，可导出 CSV：
+
+```bash
+uv run nt-okx-backtest \
+  --config configs/backtest.eth-2026.toml \
+  --resample 1h \
+  --strategy best-filter \
+  --sizing all-in \
+  --orders-csv outputs
+```
+
+订单文件会自动命名为 `orders_<执行时间>_<策略名>_<交易标的>.csv`。
+
+不基于 Nautilus 的本地计算回测放在 `scripts/` 下，例如：
+
+```bash
+uv run python scripts/local_backtest.py \
+  --config configs/backtest.eth-2026.toml \
+  --engine sma-cross \
+  --resample 1h \
   --sizing all-in
 ```
 

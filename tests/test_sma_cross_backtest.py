@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import polars as pl
 import pytest
 
-from trend_trader.backtest.run_backtest import run_sma_cross_backtest
+from scripts.local_backtest import run_sma_cross_backtest
 from trend_trader.strategies.sma_cross import SmaCrossSignal
 
 

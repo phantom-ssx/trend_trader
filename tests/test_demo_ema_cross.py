@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import polars as pl
 
-from trend_trader.backtest.run_backtest import run_strategy_demo
+from scripts.local_backtest import run_strategy_demo
 from trend_trader.strategies.demo_ema_cross import DemoEmaCrossSignal
 
 
@@ -39,4 +39,3 @@ def test_backtest_uses_strategy_signal(monkeypatch) -> None:
 
     assert calls == [10.0, 11.0, 12.0, 11.0, 10.0, 9.0]
     assert [trade.side for trade in trades] == ["SELL", "BUY", "SELL"]
-

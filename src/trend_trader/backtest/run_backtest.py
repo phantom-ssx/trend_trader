@@ -1,69 +1,52 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import polars as pl
 from rich.console import Console
 from rich.table import Table
 
-from trend_trader.backtest.nautilus_engine import NautilusBacktestOutput, run_nautilus_backtest
+from trend_trader.backtest.nautilus_engine import (
+    NautilusBacktestOutput,
+    available_nautilus_strategy_names,
+    run_nautilus_backtest,
+)
 from trend_trader.config.models import load_backtest_config
-from trend_trader.strategies.demo_ema_cross import DemoEmaCrossSignal
+from trend_trader.io.csv_export import CsvColumn, CsvExporter, int_sort_value, unix_nanos_to_iso
 
 console = Console()
 
-
-@dataclass(frozen=True)
-class Trade:
-    ts: str
-    side: str
-    price: float
-    position: float
-    equity: float
-
-
-@dataclass(frozen=True)
-class SmaCrossBacktestResult:
-    trades: list[Trade]
-    bars: int
-    starting_balance: float
-    final_equity: float
-    net_pnl: float
-    return_pct: float
-    max_drawdown_pct: float
-    total_fees: float
-    long_entries: int
-    short_entries: int
-
-
-def run_strategy_demo(
-    df: pl.DataFrame,
-    fast_period: int,
-    slow_period: int,
-    starting_balance: float,
-) -> list[Trade]:
-    data = df.sort("ts")
-    signal = DemoEmaCrossSignal(fast_period=fast_period, slow_period=slow_period)
-    trades: list[Trade] = []
-    position = 0
-    entry_price = 0.0
-    realized = 0.0
-
-    for row in data.iter_rows(named=True):
-        price = float(row["close"])
-        side = signal.on_price(price)
-        if side is None:
-            continue
-        next_position = 1 if side == "BUY" else -1
-        if position != 0:
-            realized += position * (price - entry_price)
-        position = next_position
-        entry_price = price
-        equity = starting_balance + realized
-        trades.append(Trade(str(row["ts"]), side, price, position, equity))
-    return trades
+ORDER_CSV_EXPORTER = CsvExporter(
+    [
+        CsvColumn("ts_init_iso", value=lambda order: unix_nanos_to_iso(order.get("ts_init"))),
+        CsvColumn("ts_last_iso", value=lambda order: unix_nanos_to_iso(order.get("ts_last"))),
+        "status",
+        "instrument_id",
+        "side",
+        "type",
+        "quantity",
+        "filled_qty",
+        "avg_px",
+        "slippage",
+        "liquidity_side",
+        "time_in_force",
+        "is_reduce_only",
+        "is_quote_quantity",
+        "client_order_id",
+        "venue_order_id",
+        "position_id",
+        "account_id",
+        "last_trade_id",
+        "commissions",
+        "equity_after_order_usdt",
+        "ts_init",
+        "ts_last",
+    ],
+    sort_key=int_sort_value("ts_init"),
+)
 
 
 def resample_ohlcv(df: pl.DataFrame, every: str | None) -> pl.DataFrame:
@@ -84,198 +67,57 @@ def resample_ohlcv(df: pl.DataFrame, every: str | None) -> pl.DataFrame:
     )
 
 
-def run_sma_cross_backtest(
-    df: pl.DataFrame,
-    fast_period: int,
-    slow_period: int,
-    starting_balance: float,
-    trade_size: float,
-    fee_rate: float,
-    sizing: str = "fixed",
-) -> SmaCrossBacktestResult:
-    from trend_trader.strategies.sma_cross import SmaCrossSignal
-
-    if sizing not in {"fixed", "all-in"}:
-        raise ValueError("sizing must be either 'fixed' or 'all-in'")
-    if sizing == "fixed" and trade_size <= 0:
-        raise ValueError("trade_size must be positive")
-    if fee_rate < 0:
-        raise ValueError("fee_rate must not be negative")
-
-    data = df.sort("ts")
-    signal = SmaCrossSignal(fast_period=fast_period, slow_period=slow_period)
-    trades: list[Trade] = []
-    position = 0.0
-    entry_price = 0.0
-    realized = 0.0
-    total_fees = 0.0
-    peak_equity = starting_balance
-    max_drawdown_pct = 0.0
-    long_entries = 0
-    short_entries = 0
-    last_ts = ""
-    last_price = 0.0
-
-    if sizing == "all-in":
-        cash = starting_balance
-        for row in data.iter_rows(named=True):
-            last_ts = str(row["ts"])
-            last_price = float(row["close"])
-            equity = cash + position * last_price
-            peak_equity = max(peak_equity, equity)
-            if peak_equity > 0:
-                max_drawdown_pct = max(
-                    max_drawdown_pct,
-                    (peak_equity - equity) / peak_equity * 100.0,
-                )
-
-            side = signal.on_price(last_price)
-            if side is None:
-                continue
-
-            target_direction = 1.0 if side == "BUY" else -1.0
-            target_position = target_direction * equity / last_price if equity > 0 else 0.0
-            delta = target_position - position
-            if delta == 0:
-                continue
-
-            fee = abs(delta) * last_price * fee_rate
-            cash -= delta * last_price + fee
-            total_fees += fee
-            position = target_position
-            equity_after_trade = cash + position * last_price
-            if side == "BUY":
-                long_entries += 1
-            else:
-                short_entries += 1
-            trades.append(Trade(last_ts, side, last_price, position, equity_after_trade))
-
-            peak_equity = max(peak_equity, equity_after_trade)
-            if peak_equity > 0:
-                max_drawdown_pct = max(
-                    max_drawdown_pct,
-                    (peak_equity - equity_after_trade) / peak_equity * 100.0,
-                )
-
-        if position != 0:
-            fee = abs(position) * last_price * fee_rate
-            cash += position * last_price - fee
-            total_fees += fee
-            position = 0.0
-            trades.append(Trade(last_ts, "CLOSE", last_price, position, cash))
-        final_equity = cash
-        net_pnl = final_equity - starting_balance
-        return SmaCrossBacktestResult(
-            trades=trades,
-            bars=data.height,
-            starting_balance=starting_balance,
-            final_equity=final_equity,
-            net_pnl=net_pnl,
-            return_pct=net_pnl / starting_balance * 100.0,
-            max_drawdown_pct=max_drawdown_pct,
-            total_fees=total_fees,
-            long_entries=long_entries,
-            short_entries=short_entries,
-        )
-
-    for row in data.iter_rows(named=True):
-        last_ts = str(row["ts"])
-        last_price = float(row["close"])
-        side = signal.on_price(last_price)
-        if side is not None:
-            target_position = trade_size if side == "BUY" else -trade_size
-            if target_position != position:
-                if position != 0:
-                    realized += position * (last_price - entry_price)
-                    total_fees += abs(position) * last_price * fee_rate
-                position = target_position
-                entry_price = last_price
-                total_fees += abs(position) * last_price * fee_rate
-                if side == "BUY":
-                    long_entries += 1
-                else:
-                    short_entries += 1
-                equity = starting_balance + realized - total_fees
-                trades.append(Trade(last_ts, side, last_price, position, equity))
-
-        unrealized = position * (last_price - entry_price) if position else 0.0
-        equity = starting_balance + realized + unrealized - total_fees
-        peak_equity = max(peak_equity, equity)
-        if peak_equity > 0:
-            max_drawdown_pct = max(max_drawdown_pct, (peak_equity - equity) / peak_equity * 100.0)
-
-    if position != 0:
-        realized += position * (last_price - entry_price)
-        total_fees += abs(position) * last_price * fee_rate
-        position = 0.0
-        final_equity = starting_balance + realized - total_fees
-        trades.append(Trade(last_ts, "CLOSE", last_price, position, final_equity))
-        peak_equity = max(peak_equity, final_equity)
-        if peak_equity > 0:
-            max_drawdown_pct = max(
-                max_drawdown_pct,
-                (peak_equity - final_equity) / peak_equity * 100.0,
-            )
-    else:
-        final_equity = starting_balance + realized - total_fees
-
-    net_pnl = final_equity - starting_balance
-    return SmaCrossBacktestResult(
-        trades=trades,
-        bars=data.height,
-        starting_balance=starting_balance,
-        final_equity=final_equity,
-        net_pnl=net_pnl,
-        return_pct=net_pnl / starting_balance * 100.0,
-        max_drawdown_pct=max_drawdown_pct,
-        total_fees=total_fees,
-        long_entries=long_entries,
-        short_entries=short_entries,
-    )
-
-
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run an OKX candle backtest.")
+    parser = argparse.ArgumentParser(description="Run a NautilusTrader OKX candle backtest.")
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument(
-        "--engine",
-        choices=["nautilus", "demo", "sma-cross"],
-        default="nautilus",
-        help="Backtest engine to use. Defaults to the NautilusTrader BacktestEngine.",
-    )
     parser.add_argument("--resample", help="Optional Polars interval before backtest, e.g. 1h")
     parser.add_argument("--fast-period", type=int, help="Override strategy fast period")
     parser.add_argument("--slow-period", type=int, help="Override strategy slow period")
     parser.add_argument("--trade-size", type=float, help="Override trade size in base units")
-    parser.add_argument("--fee-rate", type=float, default=0.0005, help="Fee rate per order")
     parser.add_argument(
+        "--strategy",
         "--nautilus-strategy",
-        choices=["demo-ema", "best-filter"],
+        choices=available_nautilus_strategy_names(),
         default="demo-ema",
-        help="Strategy to run when --engine nautilus is selected.",
+        help="Nautilus strategy to load.",
     )
     parser.add_argument(
         "--spread-threshold",
         type=float,
         default=0.0035,
-        help="MA spread threshold for the Nautilus best-filter strategy.",
+        help="MA spread threshold for the best-filter strategy.",
     )
     parser.add_argument(
         "--atr-pct-min",
         type=float,
         default=0.005,
-        help="Minimum ATR/close filter for the Nautilus best-filter strategy.",
+        help="Minimum ATR/close filter for the best-filter strategy.",
+    )
+    parser.add_argument(
+        "--min-order-notional",
+        type=float,
+        default=50.0,
+        help="Skip orders below this notional value in settlement currency.",
     )
     parser.add_argument(
         "--sizing",
         choices=["fixed", "all-in"],
         default="fixed",
-        help="Position sizing for sma-cross. fixed uses --trade-size; all-in targets 1x equity.",
+        help="Position sizing. fixed uses --trade-size; all-in targets 1x equity.",
+    )
+    parser.add_argument(
+        "--orders-csv",
+        type=Path,
+        help=(
+            "Write Nautilus order details to this directory or file parent. "
+            "The filename includes execution time, strategy, and instrument."
+        ),
     )
     return parser
-
+ 
 
 def main() -> None:
+    run_started_at = datetime.now().astimezone()
     args = build_parser().parse_args()
     config = load_backtest_config(args.config)
     df = pl.read_parquet(config.data.parquet_path)
@@ -286,79 +128,118 @@ def main() -> None:
 
     fast_period = args.fast_period or config.strategy.fast_period
     slow_period = args.slow_period or config.strategy.slow_period
+    if args.strategy == "best-filter":
+        fast_period = args.fast_period or 5
+        slow_period = args.slow_period or 20
     trade_size = args.trade_size or config.strategy.trade_size
     df = resample_ohlcv(df, args.resample)
 
-    if args.engine == "nautilus":
-        nautilus_fast_period = fast_period
-        nautilus_slow_period = slow_period
-        if args.nautilus_strategy == "best-filter":
-            nautilus_fast_period = args.fast_period or 5
-            nautilus_slow_period = args.slow_period or 20
-        output = run_nautilus_backtest(
-            config,
-            df,
-            strategy_name=args.nautilus_strategy,
-            bar_interval=args.resample or config.data.bar,
-            fast_period=nautilus_fast_period,
-            slow_period=nautilus_slow_period,
-            trade_size=trade_size,
-            sizing=args.sizing,
-            spread_threshold=args.spread_threshold,
-            atr_pct_min=args.atr_pct_min,
-        )
-        print_nautilus_result(output, config.data.parquet_path)
-        return
-
-    if args.engine == "sma-cross":
-        output = run_sma_cross_backtest(
-            df,
-            fast_period=fast_period,
-            slow_period=slow_period,
-            starting_balance=config.starting_balance,
-            trade_size=trade_size,
-            fee_rate=args.fee_rate,
-            sizing=args.sizing,
-        )
-        print_sma_cross_result(
-            output,
-            parquet_path=config.data.parquet_path,
-            resample=args.resample,
-            fast_period=fast_period,
-            slow_period=slow_period,
-            trade_size=trade_size,
-            fee_rate=args.fee_rate,
-            sizing=args.sizing,
-        )
-        return
-
-    trades = run_strategy_demo(
+    output = run_nautilus_backtest(
+        config,
         df,
+        strategy_name=args.strategy,
+        bar_interval=args.resample or config.data.bar,
         fast_period=fast_period,
         slow_period=slow_period,
-        starting_balance=config.starting_balance,
+        trade_size=trade_size,
+        sizing=args.sizing,
+        spread_threshold=args.spread_threshold,
+        atr_pct_min=args.atr_pct_min,
+        min_order_notional=args.min_order_notional,
     )
-
-    table = Table(title="Demo EMA Cross Backtest")
-    table.add_column("Time")
-    table.add_column("Side")
-    table.add_column("Price", justify="right")
-    table.add_column("Position", justify="right")
-    table.add_column("Equity", justify="right")
-    for trade in trades[-20:]:
-        table.add_row(
-            trade.ts,
-            trade.side,
-            f"{trade.price:.4f}",
-            str(trade.position),
-            f"{trade.equity:.2f}",
+    print_nautilus_result(output, config.data.parquet_path)
+    if args.orders_csv:
+        orders_csv_path = build_orders_csv_path(
+            args.orders_csv,
+            run_started_at=run_started_at,
+            strategy_name=output.strategy_name,
+            instrument_id=str(output.instrument_id),
         )
-    console.print(table)
-    console.print(f"Loaded {df.height} bars from {config.data.parquet_path}")
-    console.print(f"Generated {len(trades)} demo trades")
-    console.print(
-        "Signal logic: trend_trader.strategies.demo_ema_cross.DemoEmaCrossSignal"
+        ORDER_CSV_EXPORTER.export_rows(
+            orders_with_equity_after_order(
+                output.orders,
+                starting_balance=Decimal(str(config.starting_balance)),
+            ),
+            orders_csv_path,
+        )
+        console.print(f"Order details written to {orders_csv_path}")
+
+
+def orders_with_equity_after_order(
+    orders: list[dict[str, object]] | tuple[dict[str, object], ...],
+    *,
+    starting_balance: Decimal,
+) -> list[dict[str, object]]:
+    cash = starting_balance
+    position = Decimal("0")
+    enriched_orders: list[dict[str, object]] = []
+
+    for order in sorted(orders, key=lambda item: int(item.get("ts_init") or 0)):
+        row = dict(order)
+        side = str(row.get("side", "")).upper()
+        filled_qty = parse_decimal(row.get("filled_qty"))
+        avg_px = parse_decimal(row.get("avg_px"))
+        commission = parse_commission_amount(row.get("commissions"))
+
+        if side in {"BUY", "SELL"} and filled_qty is not None and avg_px is not None:
+            signed_delta = filled_qty if side == "BUY" else -filled_qty
+            cash -= signed_delta * avg_px
+            cash -= commission
+            position += signed_delta
+            equity = cash + position * avg_px
+            row["equity_after_order_usdt"] = f"{equity:.8f}"
+        else:
+            row["equity_after_order_usdt"] = ""
+
+        enriched_orders.append(row)
+
+    return enriched_orders
+
+
+def parse_decimal(value: object) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def parse_commission_amount(value: object) -> Decimal:
+    if value in (None, ""):
+        return Decimal("0")
+    values = value if isinstance(value, list | tuple) else [value]
+    total = Decimal("0")
+    for item in values:
+        amount = str(item).split(maxsplit=1)[0]
+        try:
+            total += Decimal(amount)
+        except InvalidOperation:
+            continue
+    return total
+
+
+def build_orders_csv_path(
+    target: Path,
+    *,
+    run_started_at: datetime,
+    strategy_name: str,
+    instrument_id: str,
+) -> Path:
+    directory = target.parent if target.suffix.lower() == ".csv" else target
+    timestamp = run_started_at.strftime("%Y%m%dT%H%M%S%z")
+    instrument_symbol = instrument_id.split(".", maxsplit=1)[0]
+    filename = (
+        f"orders_{timestamp}_"
+        f"{safe_filename_part(strategy_name)}_"
+        f"{safe_filename_part(instrument_symbol)}.csv"
     )
+    return directory / filename
+
+
+def safe_filename_part(value: str) -> str:
+    safe = "".join(char if char.isalnum() or char in {"-", "_"} else "-" for char in value)
+    return safe.strip("-_") or "unknown"
 
 
 def print_nautilus_result(output: NautilusBacktestOutput, parquet_path: Path) -> None:
@@ -396,64 +277,7 @@ def print_nautilus_result(output: NautilusBacktestOutput, parquet_path: Path) ->
 
     console.print(table)
     console.print(f"Loaded data from {parquet_path}")
-    if output.strategy_name == "best-filter":
-        console.print("Strategy: trend_trader.strategies.ma_spread_atr.MaSpreadAtrStrategy")
-    else:
-        console.print("Strategy: trend_trader.strategies.demo_ema_cross.DemoEmaCrossStrategy")
-
-
-def print_sma_cross_result(
-    output: SmaCrossBacktestResult,
-    *,
-    parquet_path: Path,
-    resample: str | None,
-    fast_period: int,
-    slow_period: int,
-    trade_size: float,
-    fee_rate: float,
-    sizing: str,
-) -> None:
-    table = Table(title=f"SMA Cross Backtest MA{fast_period}/MA{slow_period}")
-    table.add_column("Metric")
-    table.add_column("Value", justify="right")
-    rows = [
-        ("Loaded bars", str(output.bars)),
-        ("Resample", resample or "none"),
-        ("Sizing", sizing),
-        ("Trade size", f"{trade_size:g}" if sizing == "fixed" else "all equity, 1x"),
-        ("Fee rate", f"{fee_rate:.6f}"),
-        ("Long entries", str(output.long_entries)),
-        ("Short entries", str(output.short_entries)),
-        ("Trade events", str(len(output.trades))),
-        ("Starting balance", f"{output.starting_balance:.2f}"),
-        ("Final equity", f"{output.final_equity:.2f}"),
-        ("Net PnL", f"{output.net_pnl:.2f}"),
-        ("Return", f"{output.return_pct:.2f}%"),
-        ("Max drawdown", f"{output.max_drawdown_pct:.2f}%"),
-        ("Total fees", f"{output.total_fees:.2f}"),
-    ]
-    for key, value in rows:
-        table.add_row(key, value)
-
-    trades_table = Table(title="Last Trades")
-    trades_table.add_column("Time")
-    trades_table.add_column("Side")
-    trades_table.add_column("Price", justify="right")
-    trades_table.add_column("Position", justify="right")
-    trades_table.add_column("Equity", justify="right")
-    for trade in output.trades[-10:]:
-        trades_table.add_row(
-            trade.ts,
-            trade.side,
-            f"{trade.price:.4f}",
-            f"{trade.position:g}",
-            f"{trade.equity:.2f}",
-        )
-
-    console.print(table)
-    console.print(trades_table)
-    console.print(f"Loaded data from {parquet_path}")
-    console.print("Strategy: trend_trader.strategies.sma_cross.SmaCrossSignal")
+    console.print(f"Strategy: {output.strategy_class_path}")
 
 
 if __name__ == "__main__":

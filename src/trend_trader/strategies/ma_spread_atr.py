@@ -15,6 +15,15 @@ from nautilus_trader.trading.strategy import Strategy
 SignalSide = Literal["BUY", "SELL"]
 
 
+def is_below_min_order_notional(
+    *,
+    quantity: Decimal,
+    price: Decimal,
+    min_order_notional: Decimal,
+) -> bool:
+    return min_order_notional > 0 and quantity * price < min_order_notional
+
+
 class MaSpreadAtrSignal:
     """MA spread threshold cross filtered by ATR percentage."""
 
@@ -114,6 +123,7 @@ class MaSpreadAtrConfig(StrategyConfig, frozen=True):
     spread_threshold: float = 0.0035
     atr_period: int = 14
     atr_pct_min: float = 0.005
+    min_order_notional: Decimal = Decimal("50")
     size_precision: int = 6
 
 
@@ -124,6 +134,8 @@ class MaSpreadAtrStrategy(Strategy):
         super().__init__(config)
         if config.sizing not in {"fixed", "all-in"}:
             raise ValueError("sizing must be either 'fixed' or 'all-in'")
+        if config.min_order_notional < 0:
+            raise ValueError("min_order_notional must not be negative")
 
         self.instrument_id = config.instrument_id
         self.bar_type = config.bar_type
@@ -131,6 +143,7 @@ class MaSpreadAtrStrategy(Strategy):
         self.trade_size = config.trade_size
         self.sizing = config.sizing
         self.leverage = config.leverage
+        self.min_order_notional = config.min_order_notional
         self.size_precision = config.size_precision
         self.signal = MaSpreadAtrSignal(
             fast_period=config.fast_period,
@@ -177,6 +190,12 @@ class MaSpreadAtrStrategy(Strategy):
         delta = target_position - signed_position
         quantity = self._round_quantity(abs(delta))
         if quantity <= 0:
+            return None
+        if is_below_min_order_notional(
+            quantity=quantity,
+            price=price,
+            min_order_notional=self.min_order_notional,
+        ):
             return None
         return Quantity.from_str(f"{quantity:.{self.size_precision}f}")
 

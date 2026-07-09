@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pandas as pd
 import pytest
 
-from trend_trader.backtest.evaluate_filters import (
+from scripts.evaluate_filters import (
     add_indicators,
     monthly_results,
     run_all_in_backtest,

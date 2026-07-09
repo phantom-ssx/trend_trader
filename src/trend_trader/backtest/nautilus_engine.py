@@ -22,6 +22,14 @@ from trend_trader.strategies.ma_spread_atr import MaSpreadAtrConfig, MaSpreadAtr
 
 VENUE = Venue("OKX")
 BAR_PATTERN = re.compile(r"^(?P<step>\d+)(?P<unit>[smhd])$", re.IGNORECASE)
+NAUTILUS_STRATEGY_CLASS_PATHS = {
+    "demo-ema": "trend_trader.strategies.demo_ema_cross.DemoEmaCrossStrategy",
+    "best-filter": "trend_trader.strategies.ma_spread_atr.MaSpreadAtrStrategy",
+}
+
+
+def available_nautilus_strategy_names() -> tuple[str, ...]:
+    return tuple(NAUTILUS_STRATEGY_CLASS_PATHS)
 
 
 @dataclass(frozen=True)
@@ -31,11 +39,13 @@ class NautilusBacktestOutput:
     instrument_id: InstrumentId
     bar_type: BarType
     strategy_name: str
+    strategy_class_path: str
     final_equity: Decimal
     final_net_position: Decimal
     last_price: Decimal
     unrealized_pnl: Decimal
     estimated_liquidation_equity: Decimal
+    orders: tuple[dict[str, object], ...]
 
 
 def run_nautilus_backtest(
@@ -50,9 +60,11 @@ def run_nautilus_backtest(
     sizing: str = "fixed",
     spread_threshold: float = 0.0035,
     atr_pct_min: float = 0.005,
+    min_order_notional: float = 50.0,
 ) -> NautilusBacktestOutput:
-    if strategy_name not in {"demo-ema", "best-filter"}:
-        raise ValueError("strategy_name must be either 'demo-ema' or 'best-filter'")
+    if strategy_name not in NAUTILUS_STRATEGY_CLASS_PATHS:
+        supported = ", ".join(available_nautilus_strategy_names())
+        raise ValueError(f"strategy_name must be one of: {supported}")
 
     effective_trade_size = trade_size if trade_size is not None else config.strategy.trade_size
     price_precision = infer_price_precision(df)
@@ -88,36 +100,28 @@ def run_nautilus_backtest(
         bar_execution=True,
     )
     engine.add_instrument(instrument)
+    strategy_fast_period = fast_period or config.strategy.fast_period
+    strategy_slow_period = slow_period or config.strategy.slow_period
     if strategy_name == "best-filter":
-        engine.add_strategy(
-            MaSpreadAtrStrategy(
-                MaSpreadAtrConfig(
-                    instrument_id=instrument.id,
-                    bar_type=bar_type,
-                    settlement_currency=settlement_currency,
-                    trade_size=Decimal(str(effective_trade_size)),
-                    sizing=sizing,
-                    fast_period=fast_period or 5,
-                    slow_period=slow_period or 20,
-                    spread_threshold=spread_threshold,
-                    atr_pct_min=atr_pct_min,
-                    size_precision=size_precision,
-                ),
-            ),
-        )
-    else:
-        engine.add_strategy(
-            DemoEmaCrossStrategy(
-                DemoEmaCrossConfig(
-                    instrument_id=instrument.id,
-                    bar_type=bar_type,
-                    trade_size=Decimal(str(effective_trade_size)),
-                    fast_period=fast_period or config.strategy.fast_period,
-                    slow_period=slow_period or config.strategy.slow_period,
-                    size_precision=size_precision,
-                ),
-            ),
-        )
+        strategy_fast_period = fast_period or 5
+        strategy_slow_period = slow_period or 20
+
+    engine.add_strategy(
+        build_nautilus_strategy(
+            strategy_name=strategy_name,
+            instrument_id=instrument.id,
+            bar_type=bar_type,
+            settlement_currency=settlement_currency,
+            trade_size=Decimal(str(effective_trade_size)),
+            sizing=sizing,
+            fast_period=strategy_fast_period,
+            slow_period=strategy_slow_period,
+            spread_threshold=spread_threshold,
+            atr_pct_min=atr_pct_min,
+            min_order_notional=Decimal(str(min_order_notional)),
+            size_precision=size_precision,
+        ),
+    )
     engine.add_data(bars)
     engine.run()
 
@@ -133,6 +137,7 @@ def run_nautilus_backtest(
     unrealized_pnl = unrealized_money.as_decimal()
     estimated_close_fee = abs(final_net_position) * last_price * Decimal("0.0005")
     estimated_liquidation_equity = final_equity - estimated_close_fee
+    orders = tuple(order.to_dict() for order in engine.cache.orders())
 
     return NautilusBacktestOutput(
         result=engine.get_result(),
@@ -140,12 +145,60 @@ def run_nautilus_backtest(
         instrument_id=instrument.id,
         bar_type=bar_type,
         strategy_name=strategy_name,
+        strategy_class_path=NAUTILUS_STRATEGY_CLASS_PATHS[strategy_name],
         final_equity=final_equity,
         final_net_position=final_net_position,
         last_price=last_price,
         unrealized_pnl=unrealized_pnl,
         estimated_liquidation_equity=estimated_liquidation_equity,
+        orders=orders,
     )
+
+
+def build_nautilus_strategy(
+    *,
+    strategy_name: str,
+    instrument_id: InstrumentId,
+    bar_type: BarType,
+    settlement_currency: Currency,
+    trade_size: Decimal,
+    sizing: str,
+    fast_period: int,
+    slow_period: int,
+    spread_threshold: float,
+    atr_pct_min: float,
+    min_order_notional: Decimal,
+    size_precision: int,
+) -> DemoEmaCrossStrategy | MaSpreadAtrStrategy:
+    if strategy_name == "demo-ema":
+        return DemoEmaCrossStrategy(
+            DemoEmaCrossConfig(
+                instrument_id=instrument_id,
+                bar_type=bar_type,
+                trade_size=trade_size,
+                fast_period=fast_period,
+                slow_period=slow_period,
+                size_precision=size_precision,
+            ),
+        )
+    if strategy_name == "best-filter":
+        return MaSpreadAtrStrategy(
+            MaSpreadAtrConfig(
+                instrument_id=instrument_id,
+                bar_type=bar_type,
+                settlement_currency=settlement_currency,
+                trade_size=trade_size,
+                sizing=sizing,
+                fast_period=fast_period,
+                slow_period=slow_period,
+                spread_threshold=spread_threshold,
+                atr_pct_min=atr_pct_min,
+                min_order_notional=min_order_notional,
+                size_precision=size_precision,
+            ),
+        )
+    supported = ", ".join(available_nautilus_strategy_names())
+    raise ValueError(f"strategy_name must be one of: {supported}")
 
 
 def make_okx_perpetual(

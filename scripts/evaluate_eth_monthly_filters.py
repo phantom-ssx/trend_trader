@@ -7,7 +7,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from trend_trader.backtest.evaluate_filters import (
+from scripts.evaluate_filters import (
     FilterBacktestResult,
     load_hourly_data,
     monthly_results,

@@ -1,9 +1,10 @@
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pandas as pd
 
-from trend_trader.backtest.evaluate_filters import add_indicators, spread_confirm_signals
-from trend_trader.strategies.ma_spread_atr import MaSpreadAtrSignal
+from scripts.evaluate_filters import add_indicators, spread_confirm_signals
+from trend_trader.strategies.ma_spread_atr import MaSpreadAtrSignal, is_below_min_order_notional
 
 
 def test_ma_spread_atr_signal_matches_filter_evaluation() -> None:
@@ -37,3 +38,16 @@ def test_ma_spread_atr_signal_matches_filter_evaluation() -> None:
         actual.append(1 if side == "BUY" else -1 if side == "SELL" else 0)
 
     assert actual == expected.to_list()
+
+
+def test_min_order_notional_filters_small_rebalance_orders() -> None:
+    assert is_below_min_order_notional(
+        quantity=Decimal("0.00311259514"),
+        price=Decimal("3211.95"),
+        min_order_notional=Decimal("50"),
+    )
+    assert not is_below_min_order_notional(
+        quantity=Decimal("0.02"),
+        price=Decimal("3211.95"),
+        min_order_notional=Decimal("50"),
+    )

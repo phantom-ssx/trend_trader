@@ -27,7 +27,6 @@ dev = [
 nt-okx-download = "trend_trader.data.okx_candles:main"
 nt-okx-chart = "trend_trader.visualization.candlestick_chart:main"
 nt-okx-backtest = "trend_trader.backtest.run_backtest:main"
-nt-okx-evaluate-filters = "trend_trader.backtest.evaluate_filters:main"
 nt-okx-paper = "trend_trader.live.paper:main"
 nt-okx-live = "trend_trader.live.live:main"
 
