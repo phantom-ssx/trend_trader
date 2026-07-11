@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import statistics
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,10 +25,28 @@ class Result:
     events: int
     long_entries: int
     short_entries: int
+    trades: int
+    winning_trades: int
+    losing_trades: int
+    win_rate_pct: float
+    profit_loss_ratio: float
+    avg_win: float
+    avg_loss: float
+    max_win: float
+    min_win: float
+    win_variance: float
+    max_loss: float
+    min_loss: float
+    loss_variance: float
     score: float
 
 
-def load_hourly(parquet_path: Path) -> pd.DataFrame:
+def load_hourly(
+    parquet_path: Path,
+    *,
+    fast_period: int = 5,
+    slow_period: int = 20,
+) -> pd.DataFrame:
     df = pl.read_parquet(parquet_path)
     hourly = (
         df.sort("ts")
@@ -43,17 +62,29 @@ def load_hourly(parquet_path: Path) -> pd.DataFrame:
         .sort("ts")
     )
     data = hourly.to_pandas()
-    add_indicators(data)
+    add_indicators(data, fast_period=fast_period, slow_period=slow_period)
     return data
 
 
-def add_indicators(data: pd.DataFrame) -> None:
-    data["ma5"] = data["close"].rolling(5).mean()
-    data["ma20"] = data["close"].rolling(20).mean()
-    data["spread"] = data["ma5"] - data["ma20"]
-    data["spread_pct"] = data["spread"] / data["ma20"]
+def add_indicators(
+    data: pd.DataFrame,
+    *,
+    fast_period: int = 5,
+    slow_period: int = 20,
+) -> None:
+    if fast_period <= 0 or slow_period <= 0 or fast_period >= slow_period:
+        raise ValueError("MA periods must satisfy 0 < fast_period < slow_period")
+
+    data["ma_fast"] = data["close"].rolling(fast_period).mean()
+    data["ma_slow"] = data["close"].rolling(slow_period).mean()
+    data[f"ma{fast_period}"] = data["ma_fast"]
+    data[f"ma{slow_period}"] = data["ma_slow"]
+    data["spread"] = data["ma_fast"] - data["ma_slow"]
+    data["spread_pct"] = data["spread"] / data["ma_slow"]
     data["volume_ma20"] = data["volume"].rolling(20).mean()
-    data["ma20_slope_6h"] = (data["ma20"] - data["ma20"].shift(6)) / data["ma20"].shift(6)
+    data["ma20_slope_6h"] = (
+        data["ma_slow"] - data["ma_slow"].shift(6)
+    ) / data["ma_slow"].shift(6)
 
     prev_close = data["close"].shift(1)
     true_range = pd.concat(
@@ -94,6 +125,8 @@ def backtest(
     events = 0
     long_entries = 0
     short_entries = 0
+    trade_start_equity: float | None = None
+    trade_pnls: list[float] = []
 
     for row, signal in zip(data.itertuples(index=False), signals, strict=True):
         price = float(row.close)
@@ -111,6 +144,14 @@ def backtest(
             continue
 
         fee = abs(delta) * price * fee_rate
+        if abs(position) > 1e-12 and signal != (1 if position > 0 else -1):
+            close_fee = abs(position) * price * fee_rate
+            if trade_start_equity is not None:
+                trade_pnls.append(equity - close_fee - trade_start_equity)
+            trade_start_equity = equity - close_fee
+        elif abs(position) <= 1e-12 and abs(target_position) > 1e-12:
+            trade_start_equity = equity
+
         cash -= delta * price + fee
         position = target_position
         fees += fee
@@ -121,6 +162,9 @@ def backtest(
     last_price = float(data["close"].iloc[-1])
     if abs(position) > 1e-12:
         fee = abs(position) * last_price * fee_rate
+        equity_before_close = cash + position * last_price
+        if trade_start_equity is not None:
+            trade_pnls.append(equity_before_close - fee - trade_start_equity)
         cash += position * last_price - fee
         fees += fee
         events += 1
@@ -129,6 +173,12 @@ def backtest(
     net_pnl = final_equity - starting_balance
     return_pct = net_pnl / starting_balance * 100
     score = return_pct / max(max_dd, 1e-9)
+    wins = [pnl for pnl in trade_pnls if pnl > 0]
+    losses = [pnl for pnl in trade_pnls if pnl < 0]
+    trades = len(trade_pnls)
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = sum(losses) / len(losses) if losses else 0.0
+    profit_loss_ratio = avg_win / abs(avg_loss) if losses else float("inf") if wins else 0.0
     return Result(
         name=name,
         final_equity=final_equity,
@@ -139,6 +189,19 @@ def backtest(
         events=events,
         long_entries=long_entries,
         short_entries=short_entries,
+        trades=trades,
+        winning_trades=len(wins),
+        losing_trades=len(losses),
+        win_rate_pct=len(wins) / trades * 100 if trades else 0.0,
+        profit_loss_ratio=profit_loss_ratio,
+        avg_win=avg_win,
+        avg_loss=avg_loss,
+        max_win=max(wins, default=0.0),
+        min_win=min(wins, default=0.0),
+        win_variance=statistics.pvariance(wins) if len(wins) > 1 else 0.0,
+        max_loss=max(losses, default=0.0),
+        min_loss=min(losses, default=0.0),
+        loss_variance=statistics.pvariance(losses) if len(losses) > 1 else 0.0,
         score=score,
     )
 
@@ -228,14 +291,82 @@ def evaluate_filters(
     return results
 
 
+def parse_ma_pairs(value: str) -> list[tuple[int, int]]:
+    pairs: list[tuple[int, int]] = []
+    for item in value.split(","):
+        try:
+            fast_text, slow_text = item.strip().split(":", maxsplit=1)
+            pair = (int(fast_text), int(slow_text))
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                "MA pairs must look like 5:20,6:24,8:24"
+            ) from exc
+        if pair[0] <= 0 or pair[0] >= pair[1]:
+            raise argparse.ArgumentTypeError(
+                f"invalid MA pair {pair[0]}:{pair[1]}; require 0 < fast < slow"
+            )
+        pairs.append(pair)
+    return pairs
+
+
+def evaluate_ma_pairs(
+    data: pd.DataFrame,
+    pairs: list[tuple[int, int]],
+    *,
+    starting_balance: float,
+    fee_rate: float,
+) -> list[Result]:
+    results: list[Result] = []
+    for fast_period, slow_period in pairs:
+        candidate = data.copy()
+        add_indicators(
+            candidate,
+            fast_period=fast_period,
+            slow_period=slow_period,
+        )
+        prefix = f"ma{fast_period}/ma{slow_period}"
+        results.append(
+            backtest(
+                candidate,
+                base_cross_signals(candidate),
+                f"{prefix}_cross",
+                starting_balance=starting_balance,
+                fee_rate=fee_rate,
+            )
+        )
+        filtered = spread_confirm_signals(candidate, 0.0035).where(
+            candidate["atr_pct"] >= 0.005,
+            0,
+        )
+        results.append(
+            backtest(
+                candidate,
+                filtered,
+                f"{prefix}_spread>0.35%+atr>=0.50%",
+                starting_balance=starting_balance,
+                fee_rate=fee_rate,
+            )
+        )
+    return results
+
+
 def print_results(results: list[Result], limit: int) -> None:
     ranked = sorted(results, key=lambda r: (r.score, r.return_pct), reverse=True)
-    print("name,return_pct,max_dd_pct,net_pnl,fees,events,longs,shorts,score")
+    print(
+        "name,return_pct,max_dd_pct,net_pnl,fees,events,longs,shorts,"
+        "trades,wins,losses,win_rate_pct,profit_loss_ratio,avg_win,avg_loss,"
+        "max_win,min_win,win_variance,max_loss,min_loss,loss_variance,score"
+    )
     for result in ranked[:limit]:
         print(
             f"{result.name},{result.return_pct:.2f},{result.max_drawdown_pct:.2f},"
             f"{result.net_pnl:.2f},{result.total_fees:.2f},{result.events},"
-            f"{result.long_entries},{result.short_entries},{result.score:.3f}"
+            f"{result.long_entries},{result.short_entries},{result.trades},"
+            f"{result.winning_trades},{result.losing_trades},{result.win_rate_pct:.2f},"
+            f"{result.profit_loss_ratio:.3f},{result.avg_win:.2f},{result.avg_loss:.2f},"
+            f"{result.max_win:.2f},{result.min_win:.2f},{result.win_variance:.2f},"
+            f"{result.max_loss:.2f},{result.min_loss:.2f},{result.loss_variance:.2f},"
+            f"{result.score:.3f}"
         )
 
 
@@ -247,17 +378,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--starting-balance", type=float, default=10_000.0)
     parser.add_argument("--fee-rate", type=float, default=0.0005)
     parser.add_argument("--limit", type=int, default=30)
+    parser.add_argument(
+        "--ma-pairs",
+        type=parse_ma_pairs,
+        help=(
+            "Compare MA pairs, for example 5:20,6:24,8:24,10:30. "
+            "Each pair evaluates the raw cross and spread/ATR-filtered strategy."
+        ),
+    )
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
     data = load_hourly(args.parquet)
-    results = evaluate_filters(
-        data,
-        starting_balance=args.starting_balance,
-        fee_rate=args.fee_rate,
-    )
+    if args.ma_pairs:
+        results = evaluate_ma_pairs(
+            data,
+            args.ma_pairs,
+            starting_balance=args.starting_balance,
+            fee_rate=args.fee_rate,
+        )
+    else:
+        results = evaluate_filters(
+            data,
+            starting_balance=args.starting_balance,
+            fee_rate=args.fee_rate,
+        )
     print_results(results, limit=args.limit)
 
 

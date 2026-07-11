@@ -78,6 +78,26 @@ uv run python scripts/evaluate_filters.py \
   --format table
 ```
 
+直接比较 ETH 小时线上的过滤条件：
+
+```bash
+uv run python scripts/evaluate_eth_filters.py --limit 30
+```
+
+也可以通过 `--ma-pairs` 同时比较多组均线。均线对使用 `快线:慢线` 格式，
+每一组都会计算裸交叉策略和 `spread > 0.35% + ATR >= 0.50%` 过滤策略：
+
+```bash
+uv run python scripts/evaluate_eth_filters.py \
+  --ma-pairs 5:20,6:24,8:20,8:24,10:30 \
+  --limit 20
+```
+
+结果按收益回撤比排序，并输出收益、最大回撤、手续费、交易次数、胜率、
+盈亏比、平均盈利/亏损，以及盈利和亏损的最大值、最小值和总体方差。
+单笔交易盈亏包含开仓费、平仓费及持仓期间同方向再平衡产生的手续费；
+亏损以负数表示，因此 `min_loss` 是最严重的单笔亏损，方差单位为 `USDT²`。
+
 用 NautilusTrader 执行当前效果最好的 `spread_0.35%+ATR` 小时级全仓策略：
 
 ```bash
