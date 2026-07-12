@@ -182,6 +182,26 @@ uv run nt-okx-backtest \
   --sizing all-in
 ```
 
+执行带独立退出和冷却规则的小时级 MA5/20 策略：
+
+```bash
+uv run nt-okx-backtest \
+  --config configs/backtest.eth-hourly-ma5-ma20-exit.toml \
+  --resample 1h \
+  --strategy hourly-exit-filter \
+  --fast-period 5 \
+  --slow-period 20 \
+  --spread-threshold 0.0025 \
+  --exit-threshold 0 \
+  --atr-pct-min 0.005 \
+  --cooldown-bars 10 \
+  --sizing all-in \
+  --orders-csv outputs/hourly_ma5_20_exit
+```
+
+该策略只用 ATR 过滤开仓；多仓在 spread 回落到零、空仓在 spread 回升到零时
+退出，随后等待 10 根小时 K 线再接受新的入场信号。
+
 默认会跳过名义金额低于 `50 USDT` 的小额调仓订单；可用
 `--min-order-notional 0` 关闭过滤，或传其它数值调整阈值。
 

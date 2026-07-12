@@ -78,32 +78,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--strategy",
         "--nautilus-strategy",
         choices=available_nautilus_strategy_names(),
-        default="demo-ema",
-        help="Nautilus strategy to load.",
+        help="Nautilus strategy to load; defaults to strategy.name in config.",
     )
     parser.add_argument(
         "--spread-threshold",
         type=float,
-        default=0.0035,
-        help="MA spread threshold for the best-filter strategy.",
+        help="MA spread entry threshold; defaults to strategy config.",
     )
     parser.add_argument(
         "--atr-pct-min",
         type=float,
-        default=0.005,
-        help="Minimum ATR/close filter for the best-filter strategy.",
+        help="Minimum ATR/close filter; defaults to strategy config.",
+    )
+    parser.add_argument(
+        "--exit-threshold",
+        type=float,
+        help="Symmetric MA spread exit threshold; defaults to strategy config.",
+    )
+    parser.add_argument(
+        "--cooldown-bars",
+        type=int,
+        help="Bars to wait after exiting; defaults to strategy config.",
     )
     parser.add_argument(
         "--min-order-notional",
         type=float,
-        default=50.0,
-        help="Skip orders below this notional value in settlement currency.",
+        help="Skip smaller orders; defaults to strategy config.",
     )
     parser.add_argument(
         "--sizing",
         choices=["fixed", "all-in"],
-        default="fixed",
-        help="Position sizing. fixed uses --trade-size; all-in targets 1x equity.",
+        help="Position sizing; defaults to strategy config.",
     )
     parser.add_argument(
         "--orders-csv",
@@ -120,32 +125,59 @@ def main() -> None:
     run_started_at = datetime.now().astimezone()
     args = build_parser().parse_args()
     config = load_backtest_config(args.config)
+    strategy_name = args.strategy or config.strategy.name
+    if strategy_name not in available_nautilus_strategy_names():
+        supported = ", ".join(available_nautilus_strategy_names())
+        raise ValueError(f"strategy.name must be one of: {supported}")
     df = pl.read_parquet(config.data.parquet_path)
     required = {"ts", "open", "high", "low", "close", "volume"}
     missing = required.difference(df.columns)
     if missing:
         raise ValueError(f"Parquet file is missing columns: {sorted(missing)}")
 
-    fast_period = args.fast_period or config.strategy.fast_period
-    slow_period = args.slow_period or config.strategy.slow_period
-    if args.strategy == "best-filter":
+    fast_period = args.fast_period if args.fast_period is not None else config.strategy.fast_period
+    slow_period = args.slow_period if args.slow_period is not None else config.strategy.slow_period
+    if strategy_name == "best-filter":
         fast_period = args.fast_period or 5
         slow_period = args.slow_period or 20
-    trade_size = args.trade_size or config.strategy.trade_size
-    df = resample_ohlcv(df, args.resample)
+    trade_size = args.trade_size if args.trade_size is not None else config.strategy.trade_size
+    bar_interval = args.resample or config.strategy.bar_interval or config.data.bar
+    spread_threshold = (
+        args.spread_threshold
+        if args.spread_threshold is not None
+        else config.strategy.spread_threshold
+    )
+    atr_pct_min = args.atr_pct_min if args.atr_pct_min is not None else config.strategy.atr_pct_min
+    exit_threshold = (
+        args.exit_threshold if args.exit_threshold is not None else config.strategy.exit_threshold
+    )
+    cooldown_bars = (
+        args.cooldown_bars if args.cooldown_bars is not None else config.strategy.cooldown_bars
+    )
+    min_order_notional = (
+        args.min_order_notional
+        if args.min_order_notional is not None
+        else config.strategy.min_order_notional
+    )
+    sizing = args.sizing or config.strategy.sizing
+    df = resample_ohlcv(df, bar_interval if bar_interval != config.data.bar else None)
 
     output = run_nautilus_backtest(
         config,
         df,
-        strategy_name=args.strategy,
-        bar_interval=args.resample or config.data.bar,
+        strategy_name=strategy_name,
+        bar_interval=bar_interval,
         fast_period=fast_period,
         slow_period=slow_period,
         trade_size=trade_size,
-        sizing=args.sizing,
-        spread_threshold=args.spread_threshold,
-        atr_pct_min=args.atr_pct_min,
-        min_order_notional=args.min_order_notional,
+        sizing=sizing,
+        leverage=config.strategy.leverage,
+        spread_threshold=spread_threshold,
+        atr_period=config.strategy.atr_period,
+        atr_pct_min=atr_pct_min,
+        min_order_notional=min_order_notional,
+        exit_threshold=exit_threshold,
+        cooldown_bars=cooldown_bars,
     )
     print_nautilus_result(output, config.data.parquet_path)
     if args.orders_csv:
@@ -283,3 +315,14 @@ def print_nautilus_result(output: NautilusBacktestOutput, parquet_path: Path) ->
 
 if __name__ == "__main__":
     main()
+
+
+'''
+uv run nt-okx-backtest \
+  --config configs/backtest.eth-15m-ma25-ma80.toml \
+  --resample 15m \
+  --strategy best-filter \
+  --sizing all-in \
+  --spread-threshold 0.0025 \
+  --atr-pct-min 0.0050
+'''

@@ -15,9 +15,21 @@ class DataConfig(BaseModel):
 
 
 class StrategyConfig(BaseModel):
+    name: str = "demo-ema"
     trade_size: float = 0.001
     fast_period: int = 10
     slow_period: int = 30
+    bar_interval: str | None = None
+    sizing: str = "fixed"
+    leverage: float = 1.0
+    spread_threshold: float = 0.0035
+    exit_threshold: float = 0.0
+    atr_period: int = 14
+    atr_pct_min: float = 0.005
+    cooldown_bars: int = 10
+    min_order_notional: float = 50.0
+    maker_fee: float = 0.0002
+    taker_fee: float = 0.0005
 
 
 class BacktestConfig(BaseModel):

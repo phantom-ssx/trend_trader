@@ -1,0 +1,40 @@
+starting_balance = 10000.0
+base_currency = "USDT"
+
+[data]
+parquet_path = "data/clean/okx/ETH-USDT-SWAP/ETH-USDT-SWAP_1m_2026.parquet"
+exchange = "OKX"
+inst_id = "ETH-USDT-SWAP"
+bar = "1m"
+
+[strategy]
+# Nautilus strategy registered by the backtest engine.
+name = "hourly-exit-filter"
+
+# Input bar interval used by the strategy after resampling the 1-minute source data.
+bar_interval = "1h"
+
+# Moving-average periods on the resampled hourly bars.
+fast_period = 5
+slow_period = 20
+
+# Entry: cross above/below +/-0.25%; ATR only filters new entries.
+spread_threshold = 0.0025
+atr_period = 14
+atr_pct_min = 0.005
+
+# Exit: long/short positions close when spread crosses the zero axis.
+exit_threshold = 0.0
+
+# Do not accept another entry for 10 hourly bars after an exit.
+cooldown_bars = 10
+
+# Position sizing and order constraints.
+sizing = "all-in"
+trade_size = 0.001
+leverage = 1.0
+min_order_notional = 0.0
+
+# Simulated OKX instrument commissions. The strategy uses market orders (taker fee).
+maker_fee = 0.0002
+taker_fee = 0.0005

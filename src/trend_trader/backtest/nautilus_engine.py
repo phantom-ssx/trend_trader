@@ -18,6 +18,7 @@ from nautilus_trader.model.objects import Currency, Money, Price, Quantity
 
 from trend_trader.config.models import BacktestConfig
 from trend_trader.strategies.demo_ema_cross import DemoEmaCrossConfig, DemoEmaCrossStrategy
+from trend_trader.strategies.hourly_ma_exit import HourlyMaExitConfig, HourlyMaExitStrategy
 from trend_trader.strategies.ma_spread_atr import MaSpreadAtrConfig, MaSpreadAtrStrategy
 
 VENUE = Venue("OKX")
@@ -25,6 +26,7 @@ BAR_PATTERN = re.compile(r"^(?P<step>\d+)(?P<unit>[smhd])$", re.IGNORECASE)
 NAUTILUS_STRATEGY_CLASS_PATHS = {
     "demo-ema": "trend_trader.strategies.demo_ema_cross.DemoEmaCrossStrategy",
     "best-filter": "trend_trader.strategies.ma_spread_atr.MaSpreadAtrStrategy",
+    "hourly-exit-filter": "trend_trader.strategies.hourly_ma_exit.HourlyMaExitStrategy",
 }
 
 
@@ -58,9 +60,13 @@ def run_nautilus_backtest(
     slow_period: int | None = None,
     trade_size: float | None = None,
     sizing: str = "fixed",
+    leverage: float = 1.0,
     spread_threshold: float = 0.0035,
+    atr_period: int = 14,
     atr_pct_min: float = 0.005,
     min_order_notional: float = 50.0,
+    exit_threshold: float = 0.0,
+    cooldown_bars: int = 10,
 ) -> NautilusBacktestOutput:
     if strategy_name not in NAUTILUS_STRATEGY_CLASS_PATHS:
         supported = ", ".join(available_nautilus_strategy_names())
@@ -73,6 +79,8 @@ def run_nautilus_backtest(
         config.data.inst_id,
         price_precision=price_precision,
         size_precision=size_precision,
+        maker_fee=Decimal(str(config.strategy.maker_fee)),
+        taker_fee=Decimal(str(config.strategy.taker_fee)),
     )
     bar_type = make_bar_type(instrument.id, bar_interval or config.data.bar)
     bars = frame_to_bars(
@@ -96,13 +104,13 @@ def run_nautilus_backtest(
         account_type=AccountType.MARGIN,
         base_currency=settlement_currency,
         starting_balances=[Money(config.starting_balance, settlement_currency)],
-        default_leverage=Decimal("1"),
+        default_leverage=Decimal(str(leverage)),
         bar_execution=True,
     )
     engine.add_instrument(instrument)
     strategy_fast_period = fast_period or config.strategy.fast_period
     strategy_slow_period = slow_period or config.strategy.slow_period
-    if strategy_name == "best-filter":
+    if strategy_name in {"best-filter", "hourly-exit-filter"}:
         strategy_fast_period = fast_period or 5
         strategy_slow_period = slow_period or 20
 
@@ -114,12 +122,16 @@ def run_nautilus_backtest(
             settlement_currency=settlement_currency,
             trade_size=Decimal(str(effective_trade_size)),
             sizing=sizing,
+            leverage=Decimal(str(leverage)),
             fast_period=strategy_fast_period,
             slow_period=strategy_slow_period,
             spread_threshold=spread_threshold,
+            atr_period=atr_period,
             atr_pct_min=atr_pct_min,
             min_order_notional=Decimal(str(min_order_notional)),
             size_precision=size_precision,
+            exit_threshold=exit_threshold,
+            cooldown_bars=cooldown_bars,
         ),
     )
     engine.add_data(bars)
@@ -135,7 +147,9 @@ def run_nautilus_backtest(
         target_currency=settlement_currency,
     )
     unrealized_pnl = unrealized_money.as_decimal()
-    estimated_close_fee = abs(final_net_position) * last_price * Decimal("0.0005")
+    estimated_close_fee = (
+        abs(final_net_position) * last_price * Decimal(str(config.strategy.taker_fee))
+    )
     estimated_liquidation_equity = final_equity - estimated_close_fee
     orders = tuple(order.to_dict() for order in engine.cache.orders())
 
@@ -163,13 +177,17 @@ def build_nautilus_strategy(
     settlement_currency: Currency,
     trade_size: Decimal,
     sizing: str,
+    leverage: Decimal,
     fast_period: int,
     slow_period: int,
     spread_threshold: float,
+    atr_period: int,
     atr_pct_min: float,
     min_order_notional: Decimal,
     size_precision: int,
-) -> DemoEmaCrossStrategy | MaSpreadAtrStrategy:
+    exit_threshold: float,
+    cooldown_bars: int,
+) -> DemoEmaCrossStrategy | MaSpreadAtrStrategy | HourlyMaExitStrategy:
     if strategy_name == "demo-ema":
         return DemoEmaCrossStrategy(
             DemoEmaCrossConfig(
@@ -189,10 +207,32 @@ def build_nautilus_strategy(
                 settlement_currency=settlement_currency,
                 trade_size=trade_size,
                 sizing=sizing,
+                leverage=leverage,
                 fast_period=fast_period,
                 slow_period=slow_period,
                 spread_threshold=spread_threshold,
+                atr_period=atr_period,
                 atr_pct_min=atr_pct_min,
+                min_order_notional=min_order_notional,
+                size_precision=size_precision,
+            ),
+        )
+    if strategy_name == "hourly-exit-filter":
+        return HourlyMaExitStrategy(
+            HourlyMaExitConfig(
+                instrument_id=instrument_id,
+                bar_type=bar_type,
+                settlement_currency=settlement_currency,
+                trade_size=trade_size,
+                sizing=sizing,
+                leverage=leverage,
+                fast_period=fast_period,
+                slow_period=slow_period,
+                spread_threshold=spread_threshold,
+                atr_period=atr_period,
+                exit_threshold=exit_threshold,
+                atr_pct_min=atr_pct_min,
+                cooldown_bars=cooldown_bars,
                 min_order_notional=min_order_notional,
                 size_precision=size_precision,
             ),
@@ -205,6 +245,8 @@ def make_okx_perpetual(
     inst_id: str,
     price_precision: int = 2,
     size_precision: int = 3,
+    maker_fee: Decimal = Decimal("0.0002"),
+    taker_fee: Decimal = Decimal("0.0005"),
 ) -> CryptoPerpetual:
     parts = inst_id.split("-")
     if len(parts) < 3 or parts[-1].upper() != "SWAP":
@@ -239,8 +281,8 @@ def make_okx_perpetual(
         min_price=Price.from_str(price_increment),
         margin_init=Decimal("1.00"),
         margin_maint=Decimal("0.10"),
-        maker_fee=Decimal("0.0002"),
-        taker_fee=Decimal("0.0005"),
+        maker_fee=maker_fee,
+        taker_fee=taker_fee,
         ts_event=0,
         ts_init=0,
     )

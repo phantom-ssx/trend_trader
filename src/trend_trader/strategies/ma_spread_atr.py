@@ -24,6 +24,14 @@ def is_below_min_order_notional(
     return min_order_notional > 0 and quantity * price < min_order_notional
 
 
+def order_side_for_position_delta(delta: Decimal) -> OrderSide | None:
+    if delta > 0:
+        return OrderSide.BUY
+    if delta < 0:
+        return OrderSide.SELL
+    return None
+
+
 class MaSpreadAtrSignal:
     """MA spread threshold cross filtered by ATR percentage."""
 
@@ -168,26 +176,51 @@ class MaSpreadAtrStrategy(Strategy):
         if side_text is None:
             return
 
-        side = OrderSide.BUY if side_text == "BUY" else OrderSide.SELL
-        quantity = self._target_order_quantity(side=side, price=Decimal(str(bar.close)))
-        if quantity is None:
+        target_side = OrderSide.BUY if side_text == "BUY" else OrderSide.SELL
+        target_order = self._target_order(
+            side=target_side,
+            price=Decimal(str(bar.close)),
+        )
+        if target_order is None:
             return
+        order_side, quantity = target_order
 
         order = self.order_factory.market(
             instrument_id=self.instrument_id,
-            order_side=side,
+            order_side=order_side,
             quantity=quantity,
         )
         self.submit_order(order)
-        self.log.info(f"Submitted {side_text} order for {quantity} {self.instrument_id}")
+        self.log.info(f"Submitted {order_side.name} order for {quantity} {self.instrument_id}")
 
     def on_event(self, event: Event) -> None:
         self.log.debug(str(event))
 
-    def _target_order_quantity(self, *, side: OrderSide, price: Decimal) -> Quantity | None:
+    def _target_order(
+        self,
+        *,
+        side: OrderSide,
+        price: Decimal,
+    ) -> tuple[OrderSide, Quantity] | None:
         signed_position = Decimal(str(self.portfolio.net_position(self.instrument_id)))
         target_position = self._target_position(side=side, price=price)
+        return self._order_for_target_position(
+            target_position=target_position,
+            signed_position=signed_position,
+            price=price,
+        )
+
+    def _order_for_target_position(
+        self,
+        *,
+        target_position: Decimal,
+        signed_position: Decimal,
+        price: Decimal,
+    ) -> tuple[OrderSide, Quantity] | None:
         delta = target_position - signed_position
+        order_side = order_side_for_position_delta(delta)
+        if order_side is None:
+            return None
         quantity = self._round_quantity(abs(delta))
         if quantity <= 0:
             return None
@@ -197,7 +230,7 @@ class MaSpreadAtrStrategy(Strategy):
             min_order_notional=self.min_order_notional,
         ):
             return None
-        return Quantity.from_str(f"{quantity:.{self.size_precision}f}")
+        return order_side, Quantity.from_str(f"{quantity:.{self.size_precision}f}")
 
     def _target_position(self, *, side: OrderSide, price: Decimal) -> Decimal:
         direction = Decimal("1") if side == OrderSide.BUY else Decimal("-1")

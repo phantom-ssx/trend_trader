@@ -2,9 +2,15 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pandas as pd
+from nautilus_trader.model.enums import OrderSide
 
 from scripts.evaluate_filters import add_indicators, spread_confirm_signals
-from trend_trader.strategies.ma_spread_atr import MaSpreadAtrSignal, is_below_min_order_notional
+from trend_trader.strategies.hourly_ma_exit import HourlyMaExitStateMachine
+from trend_trader.strategies.ma_spread_atr import (
+    MaSpreadAtrSignal,
+    is_below_min_order_notional,
+    order_side_for_position_delta,
+)
 
 
 def test_ma_spread_atr_signal_matches_filter_evaluation() -> None:
@@ -51,3 +57,25 @@ def test_min_order_notional_filters_small_rebalance_orders() -> None:
         price=Decimal("3211.95"),
         min_order_notional=Decimal("50"),
     )
+
+
+def test_order_side_follows_position_delta_not_signal_direction() -> None:
+    assert order_side_for_position_delta(Decimal("0.001")) == OrderSide.BUY
+    assert order_side_for_position_delta(Decimal("-0.001")) == OrderSide.SELL
+    assert order_side_for_position_delta(Decimal("0")) is None
+
+
+def test_hourly_state_machine_exits_without_atr_and_enforces_cooldown() -> None:
+    state = HourlyMaExitStateMachine(
+        entry_threshold=0.0025,
+        exit_threshold=0.0,
+        atr_pct_min=0.005,
+        cooldown_bars=2,
+    )
+
+    assert state.on_value(spread_pct=0.002, atr_pct=0.006) is None
+    assert state.on_value(spread_pct=0.003, atr_pct=0.006) == "ENTER_LONG"
+    assert state.on_value(spread_pct=-0.001, atr_pct=0.001) == "EXIT"
+    assert state.on_value(spread_pct=-0.003, atr_pct=0.006) is None
+    assert state.on_value(spread_pct=0.001, atr_pct=0.006) is None
+    assert state.on_value(spread_pct=-0.003, atr_pct=0.006) == "ENTER_SHORT"
