@@ -98,6 +98,53 @@ uv run python scripts/evaluate_eth_filters.py \
 单笔交易盈亏包含开仓费、平仓费及持仓期间同方向再平衡产生的手续费；
 亏损以负数表示，因此 `min_loss` 是最严重的单笔亏损，方差单位为 `USDT²`。
 
+在 15 分钟 K 线上比较同一批均线组合：
+
+```bash
+uv run python scripts/evaluate_eth_15m_filters.py \
+  --ma-pairs 5:20,6:24,8:20,8:24,10:30 \
+  --include-time-equivalent \
+  --limit 20
+```
+
+`--include-time-equivalent` 会额外测试周期乘以 4 的组合，例如小时线的
+MA5/20 对应 15 分钟线的 MA20/80，使两者覆盖相同的实际时间长度。输出指标与
+小时线脚本一致，便于直接比较。15 分钟线交易更频繁，默认手续费仍为每次成交
+`0.05%`，可用 `--fee-rate` 修改。
+
+可以围绕指定均线组合搜索 spread 和 ATR 阈值组合：
+
+```bash
+uv run python scripts/evaluate_eth_15m_filters.py \
+  --ma-pairs 20:72,20:80,24:80,24:96,28:80,28:96,32:80,32:96,40:120 \
+  --filter-grid \
+  --spread-thresholds 0.001,0.0015,0.002,0.0025,0.003,0.0035 \
+  --atr-thresholds 0.0015,0.002,0.0025,0.003,0.004,0.005 \
+  --limit 30
+```
+
+使用 `--start` 和 `--end` 可以进行分段或样本外验证；`start` 包含、`end` 不包含。
+
+按自然月详细对比筛选出的三套 15 分钟候选策略：
+
+```bash
+uv run python scripts/evaluate_eth_15m_monthly.py
+```
+
+月度脚本分别计算每个月的收益、回撤、手续费、胜率、盈亏比，以及单笔盈利和
+亏损的均值、极值与总体方差。每个月独立从 `10,000 USDT` 开始，便于比较不同
+月份的策略适应性。
+
+为三套候选策略比较不同的固定止损比例：
+
+```bash
+uv run python scripts/evaluate_eth_15m_stop_losses.py \
+  --stop-losses 0.005,0.01,0.015,0.02,0.03,0.04,0.05,0.06,0.08,0.10,0.12
+```
+
+止损从开仓后的下一根 K 线开始按 `high/low` 触发；发生跳空时使用开盘价和
+止损价中更差的价格成交，并计入平仓手续费。
+
 用 NautilusTrader 执行当前效果最好的 `spread_0.35%+ATR` 小时级全仓策略：
 
 ```bash
