@@ -416,3 +416,13 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+'''
+uv run nt-okx-chart \
+  --parquet data/clean/okx/ETH-USDT-SWAP/ETH-USDT-SWAP_1m_2026.parquet \
+  --end 2026-07-07T00:00:00Z \
+  --ma-periods 5,10,20 \
+  --title "ETH-USDT-SWAP 1m 2026-07-06" \
+  --out outputs/eth_usdt_swap_1m_20260706_chart.html
+'''

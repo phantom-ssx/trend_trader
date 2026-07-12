@@ -198,3 +198,9 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+# 对于15分钟策略，如果使用ma5/ma20，指标过于灵敏。会反复下单，亏空手续费；
+
+# uv run python scripts/evaluate_eth_15m_filters.py --ma-pairs 24:80,28:80,32:80 --filter-grid --spread-thresholds 0.001,0.0015,0.002,0.0025,0.003 --atr-thresholds 0.003,0.004,0.005 --start 2026-01-01 --end 2026-07-08 --limit 12 | awk -F, '{print $1, $5, $4}' | column -t
