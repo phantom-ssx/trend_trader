@@ -4,3 +4,11 @@ bar = "1m"
 trade_size = 0.001
 demo = true
 margin_mode = "cross"
+strategy = "best-filter"
+fast_period = 5
+slow_period = 20
+spread_threshold = 0.0035
+atr_period = 14
+atr_pct_min = 0.005
+# Startup history used to initialize MA/ATR. Must exceed slow_period and atr_period.
+warmup_bars = 100

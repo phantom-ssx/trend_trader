@@ -155,7 +155,30 @@ class HourlyMaExitStrategy(MaSpreadAtrStrategy):
             cooldown_bars=config.cooldown_bars,
         )
 
+    def _warm_up_indicator(self, bar: Bar) -> None:
+        self.hourly_signal.on_bar(
+            high=float(bar.high),
+            low=float(bar.low),
+            close=float(bar.close),
+        )
+
+    def _on_warmup_complete(self, _request_id: object) -> None:
+        minimum = max(self.hourly_signal.slow_period, self.hourly_signal.atr_period) + 1
+        self.indicators_initialized = self.historical_bars_loaded >= minimum
+        if self.indicators_initialized:
+            self.log.info(
+                f"Hourly indicators initialized from {self.historical_bars_loaded} historical bars"
+            )
+        else:
+            self.log.error(
+                f"Hourly indicator warmup incomplete: loaded {self.historical_bars_loaded}, "
+                f"need at least {minimum}; order submission remains disabled"
+            )
+
     def on_bar(self, bar: Bar) -> None:
+        if not self.indicators_initialized:
+            self.log.debug("Skipping live bar while hourly indicators are warming up")
+            return
         action = self.hourly_signal.on_bar(
             high=float(bar.high),
             low=float(bar.low),

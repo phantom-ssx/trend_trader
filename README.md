@@ -277,6 +277,10 @@ uv run nt-okx-paper --config configs/paper.example.toml
 uv run nt-okx-paper --config configs/paper.example.toml --start
 ```
 
+启动后，模拟盘策略会先请求 `warmup_bars` 根历史 K 线初始化 MA/ATR。在历史数据
+达到指标所需的最小数量之前，策略仍接收实时行情，但不会提交订单；预热失败时会
+保持禁用下单并输出错误日志。
+
 实盘入口默认要求显式确认：
 
 ```bash

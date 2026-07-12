@@ -46,6 +46,18 @@ class OkxRuntimeConfig(BaseModel):
     trade_size: float = 0.001
     demo: bool = True
     margin_mode: str = "cross"
+    strategy: str = "best-filter"
+    fast_period: int = 5
+    slow_period: int = 20
+    spread_threshold: float = 0.0035
+    exit_threshold: float = 0.0
+    atr_period: int = 14
+    atr_pct_min: float = 0.005
+    cooldown_bars: int = 10
+    sizing: str = "fixed"
+    leverage: float = 1.0
+    min_order_notional: float = 50.0
+    warmup_bars: int = 100
 
 
 def load_toml(path: Path) -> dict[str, Any]:

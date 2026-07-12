@@ -133,6 +133,8 @@ class MaSpreadAtrConfig(StrategyConfig, frozen=True):
     atr_pct_min: float = 0.005
     min_order_notional: Decimal = Decimal("50")
     size_precision: int = 6
+    warmup_bars: int = 100
+    load_history_on_start: bool = False
 
 
 class MaSpreadAtrStrategy(Strategy):
@@ -144,6 +146,9 @@ class MaSpreadAtrStrategy(Strategy):
             raise ValueError("sizing must be either 'fixed' or 'all-in'")
         if config.min_order_notional < 0:
             raise ValueError("min_order_notional must not be negative")
+        minimum_warmup = max(config.slow_period, config.atr_period) + 1
+        if config.load_history_on_start and config.warmup_bars < minimum_warmup:
+            raise ValueError(f"warmup_bars must be at least {minimum_warmup}")
 
         self.instrument_id = config.instrument_id
         self.bar_type = config.bar_type
@@ -153,6 +158,11 @@ class MaSpreadAtrStrategy(Strategy):
         self.leverage = config.leverage
         self.min_order_notional = config.min_order_notional
         self.size_precision = config.size_precision
+        self.warmup_bars = config.warmup_bars
+        self.load_history_on_start = config.load_history_on_start
+        self.indicators_initialized = not config.load_history_on_start
+        self.historical_bars_loaded = 0
+        self.market_data_started = False
         self.signal = MaSpreadAtrSignal(
             fast_period=config.fast_period,
             slow_period=config.slow_period,
@@ -162,12 +172,74 @@ class MaSpreadAtrStrategy(Strategy):
         )
 
     def on_start(self) -> None:
+        if not self.load_history_on_start:
+            self._start_market_data()
+            return
+        # Live clients load their instrument providers asynchronously. Request the
+        # instrument first so the bar request cannot race the cache population.
+        self.request_instrument(
+            self.instrument_id,
+            callback=self._on_instrument_ready,
+        )
+
+    def _on_instrument_ready(self, _request_id: object) -> None:
+        if self.cache.instrument(self.instrument_id) is None:
+            self.log.error(
+                f"Instrument {self.instrument_id} was not loaded into cache; "
+                "market data and order submission remain disabled"
+            )
+            return
+        self._start_market_data()
+
+    def _start_market_data(self) -> None:
+        if self.market_data_started:
+            return
+        self.market_data_started = True
         self.subscribe_bars(self.bar_type)
+        if not self.load_history_on_start:
+            return
+        interval = self.bar_type.spec.timedelta
+        self.request_bars(
+            self.bar_type,
+            start=self.clock.utc_now() - interval * self.warmup_bars,
+            limit=self.warmup_bars,
+            callback=self._on_warmup_complete,
+        )
+
+    def on_historical_data(self, data: object) -> None:
+        if not isinstance(data, Bar):
+            return
+        self._warm_up_indicator(data)
+        self.historical_bars_loaded += 1
+
+    def _warm_up_indicator(self, bar: Bar) -> None:
+        self.signal.on_bar(
+            high=float(bar.high),
+            low=float(bar.low),
+            close=float(bar.close),
+        )
+
+    def _on_warmup_complete(self, _request_id: object) -> None:
+        minimum = max(self.signal.slow_period, self.signal.atr_period) + 1
+        self.indicators_initialized = self.historical_bars_loaded >= minimum
+        if self.indicators_initialized:
+            self.log.info(
+                f"Indicators initialized from {self.historical_bars_loaded} historical bars"
+            )
+        else:
+            self.log.error(
+                f"Indicator warmup incomplete: loaded {self.historical_bars_loaded}, "
+                f"need at least {minimum}; order submission remains disabled"
+            )
 
     def on_stop(self) -> None:
-        self.unsubscribe_bars(self.bar_type)
+        if self.market_data_started:
+            self.unsubscribe_bars(self.bar_type)
 
     def on_bar(self, bar: Bar) -> None:
+        if not self.indicators_initialized:
+            self.log.debug("Skipping live bar while indicators are warming up")
+            return
         side_text = self.signal.on_bar(
             high=float(bar.high),
             low=float(bar.low),
