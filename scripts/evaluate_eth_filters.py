@@ -8,6 +8,8 @@ from pathlib import Path
 import pandas as pd
 import polars as pl
 
+from trend_trader.backtest.metrics import annualized_sharpe_ratio, timestamps_or_daily_index
+
 DEFAULT_PARQUET = Path(
     "data/clean/okx/ETH-USDT-SWAP/"
     "ETH-USDT-SWAP_1m_20260101T000000Z_20260707T124753Z.parquet"
@@ -21,6 +23,7 @@ class Result:
     net_pnl: float
     return_pct: float
     max_drawdown_pct: float
+    sharpe_ratio: float
     total_fees: float
     events: int
     long_entries: int
@@ -127,10 +130,12 @@ def backtest(
     short_entries = 0
     trade_start_equity: float | None = None
     trade_pnls: list[float] = []
+    equity_curve: list[float] = []
 
     for row, signal in zip(data.itertuples(index=False), signals, strict=True):
         price = float(row.close)
         equity = cash + position * price
+        equity_curve.append(equity)
         peak = max(peak, equity)
         if peak > 0:
             max_dd = max(max_dd, (peak - equity) / peak * 100)
@@ -185,6 +190,7 @@ def backtest(
         net_pnl=net_pnl,
         return_pct=return_pct,
         max_drawdown_pct=max_dd,
+        sharpe_ratio=annualized_sharpe_ratio(timestamps_or_daily_index(data), equity_curve),
         total_fees=fees,
         events=events,
         long_entries=long_entries,
@@ -353,13 +359,14 @@ def evaluate_ma_pairs(
 def print_results(results: list[Result], limit: int) -> None:
     ranked = sorted(results, key=lambda r: (r.score, r.return_pct), reverse=True)
     print(
-        "name,return_pct,max_dd_pct,net_pnl,fees,events,longs,shorts,"
+        "name,return_pct,max_dd_pct,sharpe_ratio,net_pnl,fees,events,longs,shorts,"
         "trades,wins,losses,win_rate_pct,profit_loss_ratio,avg_win,avg_loss,"
         "max_win,min_win,win_variance,max_loss,min_loss,loss_variance,score"
     )
     for result in ranked[:limit]:
         print(
             f"{result.name},{result.return_pct:.2f},{result.max_drawdown_pct:.2f},"
+            f"{result.sharpe_ratio:.3f},"
             f"{result.net_pnl:.2f},{result.total_fees:.2f},{result.events},"
             f"{result.long_entries},{result.short_entries},{result.trades},"
             f"{result.winning_trades},{result.losing_trades},{result.win_rate_pct:.2f},"

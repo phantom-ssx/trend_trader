@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from trend_trader.backtest.metrics import annualized_sharpe_ratio, timestamps_or_daily_index
+
 try:
     from scripts.evaluate_eth_15m_filters import load_15min, parse_thresholds
     from scripts.evaluate_eth_15m_monthly import FOCUS_STRATEGIES, Strategy
@@ -53,6 +55,7 @@ def backtest_with_stop_loss(
     events = 0
     long_entries = 0
     short_entries = 0
+    equity_curve: list[float] = []
 
     def close_position(price: float) -> None:
         nonlocal cash, position, entry_price, trade_start_equity, fees, events
@@ -81,6 +84,7 @@ def backtest_with_stop_loss(
                     close_position(max(float(row.open), stop_price))
 
         equity = cash + position * close
+        equity_curve.append(equity)
         peak = max(peak, equity)
         if peak > 0:
             max_dd = max(max_dd, (peak - equity) / peak * 100)
@@ -113,6 +117,8 @@ def backtest_with_stop_loss(
         close_position(float(data["close"].iloc[-1]))
 
     final_equity = cash
+    if equity_curve:
+        equity_curve[-1] = final_equity
     net_pnl = final_equity - starting_balance
     return_pct = net_pnl / starting_balance * 100
     wins = [pnl for pnl in trade_pnls if pnl > 0]
@@ -127,6 +133,7 @@ def backtest_with_stop_loss(
         net_pnl=net_pnl,
         return_pct=return_pct,
         max_drawdown_pct=max_dd,
+        sharpe_ratio=annualized_sharpe_ratio(timestamps_or_daily_index(data), equity_curve),
         total_fees=fees,
         events=events,
         long_entries=long_entries,

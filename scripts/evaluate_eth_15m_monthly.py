@@ -87,14 +87,15 @@ def monthly_results(
 
 def print_monthly_results(rows: list[tuple[str, Result]]) -> None:
     print(
-        "month,strategy,return_pct,max_dd_pct,net_pnl,fees,trades,wins,losses,"
+        "month,strategy,return_pct,max_dd_pct,sharpe_ratio,net_pnl,fees,trades,wins,losses,"
         "win_rate_pct,profit_loss_ratio,avg_win,avg_loss,max_win,min_win,"
         "win_variance,max_loss,min_loss,loss_variance"
     )
     for month, result in rows:
         print(
             f"{month},{result.name},{result.return_pct:.2f},"
-            f"{result.max_drawdown_pct:.2f},{result.net_pnl:.2f},"
+            f"{result.max_drawdown_pct:.2f},{result.sharpe_ratio:.3f},"
+            f"{result.net_pnl:.2f},"
             f"{result.total_fees:.2f},{result.trades},{result.winning_trades},"
             f"{result.losing_trades},{result.win_rate_pct:.2f},"
             f"{result.profit_loss_ratio:.3f},{result.avg_win:.2f},"

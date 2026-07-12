@@ -9,6 +9,7 @@ import polars as pl
 from rich.console import Console
 from rich.table import Table
 
+from trend_trader.backtest.metrics import annualized_sharpe_ratio
 from trend_trader.config.models import load_backtest_config
 
 console = Console()
@@ -22,6 +23,7 @@ class FilterBacktestResult:
     net_pnl: float
     return_pct: float
     max_drawdown_pct: float
+    sharpe_ratio: float
     total_fees: float
     events: int
     long_entries: int
@@ -101,10 +103,12 @@ def run_all_in_backtest(
     events = 0
     long_entries = 0
     short_entries = 0
+    equity_curve: list[float] = []
 
     for row, signal in zip(data.itertuples(index=False), signals, strict=True):
         price = float(row.close)
         equity = cash + position * price
+        equity_curve.append(equity)
         peak_equity = max(peak_equity, equity)
         if peak_equity > 0:
             max_drawdown_pct = max(
@@ -146,6 +150,7 @@ def run_all_in_backtest(
         net_pnl=net_pnl,
         return_pct=return_pct,
         max_drawdown_pct=max_drawdown_pct,
+        sharpe_ratio=annualized_sharpe_ratio(data["ts"], equity_curve),
         total_fees=total_fees,
         events=events,
         long_entries=long_entries,
@@ -244,6 +249,7 @@ def print_overall_table(results: list[FilterBacktestResult]) -> None:
     table.add_column("Strategy")
     table.add_column("Return", justify="right")
     table.add_column("Max DD", justify="right")
+    table.add_column("Sharpe", justify="right")
     table.add_column("Net PnL", justify="right")
     table.add_column("Fees", justify="right")
     table.add_column("Events", justify="right")
@@ -253,6 +259,7 @@ def print_overall_table(results: list[FilterBacktestResult]) -> None:
             result.name,
             f"{result.return_pct:.2f}%",
             f"{result.max_drawdown_pct:.2f}%",
+            f"{result.sharpe_ratio:.3f}",
             f"{result.net_pnl:.2f}",
             f"{result.total_fees:.2f}",
             str(result.events),
@@ -268,6 +275,7 @@ def print_monthly_table(rows: list[tuple[str, FilterBacktestResult]]) -> None:
     table.add_column("Bars", justify="right")
     table.add_column("Return", justify="right")
     table.add_column("Max DD", justify="right")
+    table.add_column("Sharpe", justify="right")
     table.add_column("Net PnL", justify="right")
     table.add_column("Fees", justify="right")
     table.add_column("Events", justify="right")
@@ -278,6 +286,7 @@ def print_monthly_table(rows: list[tuple[str, FilterBacktestResult]]) -> None:
             str(result.bars),
             f"{result.return_pct:.2f}%",
             f"{result.max_drawdown_pct:.2f}%",
+            f"{result.sharpe_ratio:.3f}",
             f"{result.net_pnl:.2f}",
             f"{result.total_fees:.2f}",
             str(result.events),
@@ -286,22 +295,23 @@ def print_monthly_table(rows: list[tuple[str, FilterBacktestResult]]) -> None:
 
 
 def print_overall_csv(results: list[FilterBacktestResult]) -> None:
-    print("strategy,bars,return_pct,max_dd_pct,net_pnl,fees,events,longs,shorts,score")
+    print("strategy,bars,return_pct,max_dd_pct,sharpe_ratio,net_pnl,fees,events,longs,shorts,score")
     for result in results:
         print(
             f"{result.name},{result.bars},{result.return_pct:.2f},"
-            f"{result.max_drawdown_pct:.2f},{result.net_pnl:.2f},"
+            f"{result.max_drawdown_pct:.2f},{result.sharpe_ratio:.3f},"
+            f"{result.net_pnl:.2f},"
             f"{result.total_fees:.2f},{result.events},{result.long_entries},"
             f"{result.short_entries},{result.score:.3f}"
         )
 
 
 def print_monthly_csv(rows: list[tuple[str, FilterBacktestResult]]) -> None:
-    print("month,strategy,bars,return_pct,max_dd_pct,net_pnl,fees,events")
+    print("month,strategy,bars,return_pct,max_dd_pct,sharpe_ratio,net_pnl,fees,events")
     for month, result in rows:
         print(
             f"{month},{result.name},{result.bars},{result.return_pct:.2f},"
-            f"{result.max_drawdown_pct:.2f},{result.net_pnl:.2f},"
+            f"{result.max_drawdown_pct:.2f},{result.sharpe_ratio:.3f},{result.net_pnl:.2f},"
             f"{result.total_fees:.2f},{result.events}"
         )
 

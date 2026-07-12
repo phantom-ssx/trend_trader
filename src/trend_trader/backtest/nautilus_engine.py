@@ -86,7 +86,7 @@ def run_nautilus_backtest(
         config=BacktestEngineConfig(
             trader_id="BACKTESTER-001",
             logging=LoggingConfig(log_level="WARN", print_config=False),
-            run_analysis=False,
+            run_analysis=True,
         ),
     )
     settlement_currency = Currency.from_str(config.base_currency)

@@ -55,6 +55,7 @@ def summarize_by_strategy(
     for strategy, results in grouped.items():
         returns = [result.return_pct for result in results]
         drawdowns = [result.max_drawdown_pct for result in results]
+        sharpes = [result.sharpe_ratio for result in results]
         fees = [result.total_fees for result in results]
         events = [result.events for result in results]
         summary.append(
@@ -67,6 +68,7 @@ def summarize_by_strategy(
                 "worst_month_pct": min(returns),
                 "best_month_pct": max(returns),
                 "avg_drawdown_pct": sum(drawdowns) / len(drawdowns),
+                "avg_sharpe_ratio": sum(sharpes) / len(sharpes),
                 "avg_fees": sum(fees) / len(fees),
                 "avg_events": sum(events) / len(events),
             }
@@ -93,6 +95,7 @@ def print_monthly_table(rows: list[tuple[str, FilterBacktestResult]]) -> None:
     table.add_column("Bars", justify="right")
     table.add_column("Return", justify="right")
     table.add_column("Max DD", justify="right")
+    table.add_column("Sharpe", justify="right")
     table.add_column("Net PnL", justify="right")
     table.add_column("Fees", justify="right")
     table.add_column("Events", justify="right")
@@ -103,6 +106,7 @@ def print_monthly_table(rows: list[tuple[str, FilterBacktestResult]]) -> None:
             str(result.bars),
             f"{result.return_pct:.2f}%",
             f"{result.max_drawdown_pct:.2f}%",
+            f"{result.sharpe_ratio:.3f}",
             f"{result.net_pnl:.2f}",
             f"{result.total_fees:.2f}",
             str(result.events),
@@ -118,6 +122,7 @@ def print_summary_table(summary: list[dict[str, float | int | str]]) -> None:
     table.add_column("Worst", justify="right")
     table.add_column("Best", justify="right")
     table.add_column("Avg DD", justify="right")
+    table.add_column("Avg Sharpe", justify="right")
     table.add_column("Avg Fees", justify="right")
     table.add_column("Avg Events", justify="right")
     for row in summary:
@@ -128,6 +133,7 @@ def print_summary_table(summary: list[dict[str, float | int | str]]) -> None:
             f"{float(row['worst_month_pct']):.2f}%",
             f"{float(row['best_month_pct']):.2f}%",
             f"{float(row['avg_drawdown_pct']):.2f}%",
+            f"{float(row['avg_sharpe_ratio']):.3f}",
             f"{float(row['avg_fees']):.2f}",
             f"{float(row['avg_events']):.1f}",
         )
@@ -140,6 +146,7 @@ def print_best_table(rows: list[tuple[str, FilterBacktestResult]]) -> None:
     table.add_column("Strategy")
     table.add_column("Return", justify="right")
     table.add_column("Max DD", justify="right")
+    table.add_column("Sharpe", justify="right")
     table.add_column("Fees", justify="right")
     table.add_column("Events", justify="right")
     for month, result in rows:
@@ -148,6 +155,7 @@ def print_best_table(rows: list[tuple[str, FilterBacktestResult]]) -> None:
             result.name,
             f"{result.return_pct:.2f}%",
             f"{result.max_drawdown_pct:.2f}%",
+            f"{result.sharpe_ratio:.3f}",
             f"{result.total_fees:.2f}",
             str(result.events),
         )
@@ -155,11 +163,11 @@ def print_best_table(rows: list[tuple[str, FilterBacktestResult]]) -> None:
 
 
 def print_monthly_csv(rows: list[tuple[str, FilterBacktestResult]]) -> None:
-    print("month,strategy,bars,return_pct,max_dd_pct,net_pnl,fees,events")
+    print("month,strategy,bars,return_pct,max_dd_pct,sharpe_ratio,net_pnl,fees,events")
     for month, result in rows:
         print(
             f"{month},{result.name},{result.bars},{result.return_pct:.2f},"
-            f"{result.max_drawdown_pct:.2f},{result.net_pnl:.2f},"
+            f"{result.max_drawdown_pct:.2f},{result.sharpe_ratio:.3f},{result.net_pnl:.2f},"
             f"{result.total_fees:.2f},{result.events}"
         )
 
@@ -167,7 +175,7 @@ def print_monthly_csv(rows: list[tuple[str, FilterBacktestResult]]) -> None:
 def print_summary_csv(summary: list[dict[str, float | int | str]]) -> None:
     print(
         "strategy,avg_return_pct,sum_return_pct,win_months,months,"
-        "worst_month_pct,best_month_pct,avg_drawdown_pct,avg_fees,avg_events"
+        "worst_month_pct,best_month_pct,avg_drawdown_pct,avg_sharpe_ratio,avg_fees,avg_events"
     )
     for row in summary:
         print(
@@ -175,16 +183,17 @@ def print_summary_csv(summary: list[dict[str, float | int | str]]) -> None:
             f"{float(row['sum_return_pct']):.2f},{int(row['win_months'])},"
             f"{int(row['months'])},{float(row['worst_month_pct']):.2f},"
             f"{float(row['best_month_pct']):.2f},{float(row['avg_drawdown_pct']):.2f},"
+            f"{float(row['avg_sharpe_ratio']):.3f},"
             f"{float(row['avg_fees']):.2f},{float(row['avg_events']):.1f}"
         )
 
 
 def print_best_csv(rows: list[tuple[str, FilterBacktestResult]]) -> None:
-    print("month,strategy,return_pct,max_dd_pct,net_pnl,fees,events")
+    print("month,strategy,return_pct,max_dd_pct,sharpe_ratio,net_pnl,fees,events")
     for month, result in rows:
         print(
             f"{month},{result.name},{result.return_pct:.2f},"
-            f"{result.max_drawdown_pct:.2f},{result.net_pnl:.2f},"
+            f"{result.max_drawdown_pct:.2f},{result.sharpe_ratio:.3f},{result.net_pnl:.2f},"
             f"{result.total_fees:.2f},{result.events}"
         )
 

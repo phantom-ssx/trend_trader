@@ -266,6 +266,7 @@ def print_nautilus_result(output: NautilusBacktestOutput, parquet_path: Path) ->
         ("Last price", f"{output.last_price:.2f}"),
         ("Unrealized PnL", f"{output.unrealized_pnl:.2f}"),
         ("Est. equity after final close", f"{output.estimated_liquidation_equity:.2f}"),
+        ("Sharpe ratio", f"{result.stats_returns.get('Sharpe Ratio (252 days)', 0.0):.3f}"),
     ]
     rows.extend(
         (key, value)

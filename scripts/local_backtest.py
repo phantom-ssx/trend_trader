@@ -8,6 +8,7 @@ import polars as pl
 from rich.console import Console
 from rich.table import Table
 
+from trend_trader.backtest.metrics import annualized_sharpe_ratio
 from trend_trader.config.models import load_backtest_config
 from trend_trader.strategies.demo_ema_cross import DemoEmaCrossSignal
 
@@ -32,6 +33,7 @@ class SmaCrossBacktestResult:
     net_pnl: float
     return_pct: float
     max_drawdown_pct: float
+    sharpe_ratio: float
     total_fees: float
     long_entries: int
     short_entries: int
@@ -114,6 +116,7 @@ def run_sma_cross_backtest(
     short_entries = 0
     last_ts = ""
     last_price = 0.0
+    equity_curve: list[float] = []
 
     if sizing == "all-in":
         cash = starting_balance
@@ -121,6 +124,7 @@ def run_sma_cross_backtest(
             last_ts = str(row["ts"])
             last_price = float(row["close"])
             equity = cash + position * last_price
+            equity_curve.append(equity)
             peak_equity = max(peak_equity, equity)
             if peak_equity > 0:
                 max_drawdown_pct = max(
@@ -163,6 +167,8 @@ def run_sma_cross_backtest(
             position = 0.0
             trades.append(Trade(last_ts, "CLOSE", last_price, position, cash))
         final_equity = cash
+        if equity_curve:
+            equity_curve[-1] = final_equity
         net_pnl = final_equity - starting_balance
         return SmaCrossBacktestResult(
             trades=trades,
@@ -172,6 +178,7 @@ def run_sma_cross_backtest(
             net_pnl=net_pnl,
             return_pct=net_pnl / starting_balance * 100.0,
             max_drawdown_pct=max_drawdown_pct,
+            sharpe_ratio=annualized_sharpe_ratio(data["ts"], equity_curve),
             total_fees=total_fees,
             long_entries=long_entries,
             short_entries=short_entries,
@@ -199,6 +206,7 @@ def run_sma_cross_backtest(
 
         unrealized = position * (last_price - entry_price) if position else 0.0
         equity = starting_balance + realized + unrealized - total_fees
+        equity_curve.append(equity)
         peak_equity = max(peak_equity, equity)
         if peak_equity > 0:
             max_drawdown_pct = max(max_drawdown_pct, (peak_equity - equity) / peak_equity * 100.0)
@@ -219,6 +227,8 @@ def run_sma_cross_backtest(
         final_equity = starting_balance + realized - total_fees
 
     net_pnl = final_equity - starting_balance
+    if equity_curve:
+        equity_curve[-1] = final_equity
     return SmaCrossBacktestResult(
         trades=trades,
         bars=data.height,
@@ -227,6 +237,7 @@ def run_sma_cross_backtest(
         net_pnl=net_pnl,
         return_pct=net_pnl / starting_balance * 100.0,
         max_drawdown_pct=max_drawdown_pct,
+        sharpe_ratio=annualized_sharpe_ratio(data["ts"], equity_curve),
         total_fees=total_fees,
         long_entries=long_entries,
         short_entries=short_entries,
@@ -350,6 +361,7 @@ def print_sma_cross_result(
         ("Net PnL", f"{output.net_pnl:.2f}"),
         ("Return", f"{output.return_pct:.2f}%"),
         ("Max drawdown", f"{output.max_drawdown_pct:.2f}%"),
+        ("Sharpe ratio", f"{output.sharpe_ratio:.3f}"),
         ("Total fees", f"{output.total_fees:.2f}"),
     ]
     for key, value in rows:
