@@ -1,0 +1,21 @@
+inst_id = "ETH-USDT-SWAP"
+instrument_family = "ETH-USDT"
+bar = "1h"
+trade_size = 0.001
+demo = true
+margin_mode = "cross"
+
+strategy = "hourly-exit-filter"
+fast_period = 5
+slow_period = 20
+spread_threshold = 0.0025
+exit_threshold = 0.0
+atr_period = 14
+atr_pct_min = 0.005
+cooldown_bars = 10
+sizing = "all-in"
+leverage = 1.0
+min_order_notional = 0.0
+
+# Load enough hourly bars to initialize MA20 and ATR14 before orders are enabled.
+warmup_bars = 100
