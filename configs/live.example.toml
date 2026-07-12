@@ -4,3 +4,6 @@ bar = "1m"
 trade_size = 0.001
 demo = false
 margin_mode = "cross"
+
+# Bark 推送地址通过环境变量 BARK_URL 配置，例如：
+# BARK_URL=https://api.day.app/your-device-key

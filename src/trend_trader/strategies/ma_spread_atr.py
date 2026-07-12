@@ -8,9 +8,12 @@ from nautilus_trader.config import StrategyConfig
 from nautilus_trader.core.message import Event
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.events import OrderFilled
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Currency, Quantity
 from nautilus_trader.trading.strategy import Strategy
+
+from trend_trader.notifications import BarkNotifier
 
 SignalSide = Literal["BUY", "SELL"]
 
@@ -135,6 +138,8 @@ class MaSpreadAtrConfig(StrategyConfig, frozen=True):
     size_precision: int = 6
     warmup_bars: int = 100
     load_history_on_start: bool = False
+    bark_url: str | None = None
+    trading_mode: str | None = None
 
 
 class MaSpreadAtrStrategy(Strategy):
@@ -163,6 +168,11 @@ class MaSpreadAtrStrategy(Strategy):
         self.indicators_initialized = not config.load_history_on_start
         self.historical_bars_loaded = 0
         self.market_data_started = False
+        self.notifier = (
+            BarkNotifier(config.bark_url, config.trading_mode, on_error=self.log.warning)
+            if config.bark_url and config.trading_mode in {"模拟盘", "实盘"}
+            else None
+        )
         self.signal = MaSpreadAtrSignal(
             fast_period=config.fast_period,
             slow_period=config.slow_period,
@@ -237,6 +247,7 @@ class MaSpreadAtrStrategy(Strategy):
             self.unsubscribe_bars(self.bar_type)
 
     def on_bar(self, bar: Bar) -> None:
+        self._notify_bar(bar)
         if not self.indicators_initialized:
             self.log.debug("Skipping live bar while indicators are warming up")
             return
@@ -266,7 +277,36 @@ class MaSpreadAtrStrategy(Strategy):
         self.log.info(f"Submitted {order_side.name} order for {quantity} {self.instrument_id}")
 
     def on_event(self, event: Event) -> None:
+        if isinstance(event, OrderFilled):
+            self._notify_trade(event)
         self.log.debug(str(event))
+
+    def _notify_bar(self, bar: Bar) -> None:
+        if self.notifier is None:
+            return
+        body = (
+            f"标的: {self.instrument_id}\n"
+            f"周期: {self.bar_type.spec}\n"
+            f"时间(ns): {bar.ts_event}\n"
+            f"开: {bar.open}  高: {bar.high}\n"
+            f"低: {bar.low}  收: {bar.close}\n"
+            f"成交量: {bar.volume}"
+        )
+        self.notifier.send(f"[{self.notifier.mode}] K线", body)
+
+    def _notify_trade(self, fill: OrderFilled) -> None:
+        if self.notifier is None:
+            return
+        body = (
+            f"标的: {fill.instrument_id}\n"
+            f"方向: {fill.order_side.name}\n"
+            f"数量: {fill.last_qty}\n"
+            f"成交价: {fill.last_px}\n"
+            f"手续费: {fill.commission}\n"
+            f"成交ID: {fill.trade_id}\n"
+            f"时间(ns): {fill.ts_event}"
+        )
+        self.notifier.send(f"[{self.notifier.mode}] 交易成交", body)
 
     def _target_order(
         self,

@@ -12,3 +12,6 @@ atr_period = 14
 atr_pct_min = 0.005
 # Startup history used to initialize MA/ATR. Must exceed slow_period and atr_period.
 warmup_bars = 100
+
+# Bark 推送地址通过环境变量 BARK_URL 配置，例如：
+# BARK_URL=https://api.day.app/your-device-key

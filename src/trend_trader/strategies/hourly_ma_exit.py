@@ -176,6 +176,7 @@ class HourlyMaExitStrategy(MaSpreadAtrStrategy):
             )
 
     def on_bar(self, bar: Bar) -> None:
+        self._notify_bar(bar)
         if not self.indicators_initialized:
             self.log.debug("Skipping live bar while hourly indicators are warming up")
             return

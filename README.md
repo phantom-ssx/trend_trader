@@ -258,6 +258,16 @@ uv run nt-okx-chart \
 
 ## 模拟盘 / 实盘
 
+模拟盘和实盘可通过 Bark 接收每根实时 K 线与每笔实际成交的推送。启动前设置
+设备推送地址（不要提交包含 device key 的 `.env`）：
+
+```bash
+export BARK_URL="https://api.day.app/your-device-key"
+```
+
+推送标题会明确标注 `模拟盘` 或 `实盘`。历史 K 线预热和回测不会发送推送；未设置
+`BARK_URL` 时推送功能保持关闭。
+
 先复制环境变量：
 
 ```bash

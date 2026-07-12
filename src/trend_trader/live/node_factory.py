@@ -89,6 +89,8 @@ def build_trading_node(config: OkxRuntimeConfig) -> TradingNode:
         "min_order_notional": Decimal(str(config.min_order_notional)),
         "warmup_bars": config.warmup_bars,
         "load_history_on_start": True,
+        "bark_url": os.getenv("BARK_URL"),
+        "trading_mode": "模拟盘" if config.demo else "实盘",
     }
     if config.strategy == "best-filter":
         strategy = MaSpreadAtrStrategy(MaSpreadAtrConfig(**strategy_config))
