@@ -8,7 +8,7 @@ from nautilus_trader.adapters.okx.factories import (
     OKXLiveDataClientFactory,
     OKXLiveExecClientFactory,
 )
-from nautilus_trader.config import TradingNodeConfig
+from nautilus_trader.config import InstrumentProviderConfig, TradingNodeConfig
 from nautilus_trader.core.nautilus_pyo3 import OKXEnvironment, OKXInstrumentType, OKXMarginMode
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import InstrumentId
@@ -50,8 +50,12 @@ def build_okx_client_configs(
         "api_secret": _required_env("OKX_API_SECRET"),
         "api_passphrase": _required_env("OKX_PASSPHRASE"),
     }
+    instrument_id = InstrumentId.from_str(f"{config.inst_id}.OKX")
     common = {
         **credentials,
+        "instrument_provider": InstrumentProviderConfig(
+            load_ids=frozenset({instrument_id}),
+        ),
         "instrument_types": (OKXInstrumentType.SWAP,),
         "instrument_families": (config.instrument_family,),
         "environment": _environment(config.demo),
