@@ -1,6 +1,6 @@
 # trend_trader
 
-基于 `uv` 和 `nautilus-trader` 的最小 OKX 合约策略项目。
+基于 `uv` 和 `nautilus-trader` 的可扩展趋势交易项目，面向多交易所设计，当前首先支持 OKX。
 
 ## 结构
 
@@ -22,7 +22,7 @@ uv sync --extra dev
 示例下载 `BTC-USDT-SWAP` 1 分钟 K 线：
 
 ```bash
-uv run nt-okx-download \
+uv run trend-trader-download \
   --inst-id BTC-USDT-SWAP \
   --bar 1m \
   --start 2024-01-01T00:00:00Z \
@@ -38,7 +38,7 @@ uv run nt-okx-download \
 下载源默认是 OKX 专用 REST：
 
 ```bash
-uv run nt-okx-download \
+uv run trend-trader-download \
   --source okx-rest \
   --inst-id ETH-USDT-SWAP \
   --bar 1m \
@@ -49,7 +49,7 @@ uv run nt-okx-download \
 也可以使用 `ccxt` 统一接口：
 
 ```bash
-uv run nt-okx-download \
+uv run trend-trader-download \
   --source ccxt \
   --inst-id ETH-USDT-SWAP \
   --bar 1m \
@@ -63,10 +63,63 @@ uv run nt-okx-download \
 
 `ts, open, high, low, close, volume, volume_ccy, volume_quote, confirm, exchange, inst_id, bar`
 
+## 下载 OKX 历史资金费率
+
+```bash
+uv run trend-trader-funding-download \
+  --inst-id ETH-USDT-SWAP \
+  --start 2021-01-01T00:00:00Z \
+  --end 2026-07-16T16:00:00Z
+```
+
+默认输出到 `data/clean/okx/<inst-id>/<inst-id>_funding_rates.parquet`。OKX 公共接口
+目前仅返回最近约三个月的历史记录；即使指定更早的开始时间，输出仍受该保留窗口限制。
+输出字段为：
+
+`ts, funding_rate, realized_rate, method, formula_type, exchange, inst_id`
+
+## 统一数据查询 API
+
+上层代码可以通过同一个 `MarketDataClient` 查询不同数据集。时间范围统一为 UTC
+的左闭右开区间 `[start, end)`，返回值统一为 Polars `DataFrame`：
+
+```python
+from trend_trader.data import MarketDataClient
+
+data = MarketDataClient()
+
+# 从 OKX REST 查询 K 线
+candles = data.candles(
+    "ETH-USDT-SWAP",
+    "1H",
+    "2026-07-01T00:00:00Z",
+    "2026-07-02T00:00:00Z",
+)
+
+# 从 OKX REST 查询资金费率
+funding = data.funding_rates(
+    "ETH-USDT-SWAP",
+    "2026-07-01T00:00:00Z",
+    "2026-07-02T00:00:00Z",
+)
+
+# 同一 API 也可以读取本地 Parquet，并自动按时间、交易所、合约和周期过滤
+local_candles = data.candles(
+    "ETH-USDT-SWAP",
+    "1H",
+    "2026-07-01T00:00:00Z",
+    "2026-07-02T00:00:00Z",
+    path="data/clean/okx/ETH-USDT-SWAP/hourly.parquet",
+)
+```
+
+异步程序使用 `await data.query_async(DataQuery(...))`。新增交易所或数据库时，
+实现 `DataSource` 协议并通过 `data.register(source)` 注册即可，上层 API 不需要改变。
+
 ## 回测
 
 ```bash
-uv run nt-okx-backtest --config configs/backtest.example.toml
+uv run trend-trader-backtest --config configs/backtest.example.toml
 ```
 
 对比 MA 交叉过滤策略的整体或月度表现：
@@ -196,7 +249,7 @@ uv run python scripts/evaluate_eth_15m_stop_losses.py \
 用 NautilusTrader 执行当前效果最好的 `spread_0.35%+ATR` 小时级全仓策略：
 
 ```bash
-uv run nt-okx-backtest \
+uv run trend-trader-backtest \
   --config configs/backtest.eth-2026.toml \
   --resample 1h \
   --strategy best-filter \
@@ -206,7 +259,7 @@ uv run nt-okx-backtest \
 执行带独立退出和冷却规则的小时级 MA5/20 策略：
 
 ```bash
-uv run nt-okx-backtest \
+uv run trend-trader-backtest \
   --config configs/backtest.eth-hourly-ma5-ma20-exit.toml \
   --resample 1h \
   --strategy hourly-exit-filter \
@@ -229,7 +282,7 @@ uv run nt-okx-backtest \
 如需查看 Nautilus 回测的订单明细，可导出 CSV：
 
 ```bash
-uv run nt-okx-backtest \
+uv run trend-trader-backtest \
   --config configs/backtest.eth-2026.toml \
   --resample 1h \
   --strategy best-filter \
@@ -254,7 +307,7 @@ uv run python scripts/local_backtest.py \
 从 Parquet 文件生成 HTML K 线图：
 
 ```bash
-uv run nt-okx-chart \
+uv run trend-trader-chart \
   --parquet data/clean/okx/ETH-USDT-SWAP/ETH-USDT-SWAP_1m_20260101T000000Z_20260707T124753Z.parquet \
   --start 2026-07-06T00:00:00Z \
   --end 2026-07-07T00:00:00Z \
@@ -268,7 +321,7 @@ uv run nt-okx-chart \
 长区间建议重采样后绘图：
 
 ```bash
-uv run nt-okx-chart \
+uv run trend-trader-chart \
   --parquet data/clean/okx/ETH-USDT-SWAP/ETH-USDT-SWAP_1m_20260101T000000Z_20260707T124753Z.parquet \
   --start 2026-01-01T00:00:00Z \
   --end 2026-07-07T12:47:53Z \
@@ -298,14 +351,14 @@ cp .env.example .env
 模拟盘：
 
 ```bash
-uv run nt-okx-paper --config configs/paper.example.toml
+uv run trend-trader-paper --config configs/paper.example.toml
 ```
 
 默认只做 dry-run：读取配置、检查密钥、构造 Nautilus 的 `OKXDataClientConfig` 和
 `OKXExecClientConfig`。确认无误后再启动真实 Nautilus node：
 
 ```bash
-uv run nt-okx-paper --config configs/paper.example.toml --start
+uv run trend-trader-paper --config configs/paper.example.toml --start
 ```
 
 启动后，模拟盘策略会先请求 `warmup_bars` 根历史 K 线初始化 MA/ATR。在历史数据
@@ -315,13 +368,13 @@ uv run nt-okx-paper --config configs/paper.example.toml --start
 实盘入口默认要求显式确认：
 
 ```bash
-uv run nt-okx-live --config configs/live.example.toml --i-understand-this-is-live
+uv run trend-trader-live --config configs/live.example.toml --i-understand-this-is-live
 ```
 
 实盘同样默认 dry-run。确认配置无误后才加 `--start`：
 
 ```bash
-uv run nt-okx-live \
+uv run trend-trader-live \
   --config configs/live.example.toml \
   --i-understand-this-is-live \
   --start

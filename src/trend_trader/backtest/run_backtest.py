@@ -318,7 +318,7 @@ if __name__ == "__main__":
 
 
 '''
-uv run nt-okx-backtest \
+uv run trend-trader-backtest \
   --config configs/backtest.eth-15m-ma25-ma80.toml \
   --resample 15m \
   --strategy best-filter \

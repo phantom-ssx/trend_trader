@@ -419,7 +419,7 @@ if __name__ == "__main__":
 
 
 '''
-uv run nt-okx-chart \
+uv run trend-trader-chart \
   --parquet data/clean/okx/ETH-USDT-SWAP/ETH-USDT-SWAP_1m_2026.parquet \
   --end 2026-07-11T00:00:00Z \
   --ma-periods 5,20 \

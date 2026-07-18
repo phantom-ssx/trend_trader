@@ -1,2 +1,1 @@
-"""Minimal NautilusTrader OKX project."""
-
+"""Extensible multi-exchange trend trading project built on NautilusTrader."""
