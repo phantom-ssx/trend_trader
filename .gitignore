@@ -7,6 +7,7 @@ data/raw/
 data/clean/
 data/market/
 outputs/
+/experiments/
 *.pyc
 .idea/
 .vscode/
