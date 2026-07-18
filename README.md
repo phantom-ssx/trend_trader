@@ -743,3 +743,169 @@ incremental = analyzer.unique_contribution(
 
 高级冗余分析按时点执行多次截面回归，计算成本高于普通 IC，因此不会在
 `FactorAnalyzer.run()` 中默认执行，需要显式调用 `redundancy_report()`。
+
+## 配置驱动的实验
+
+实验明确分成两条独立管线：
+
+- `trend_trader.experiments.factor`：一次只研究一个因子，判断预测能力、覆盖率、稳定性、
+  分组单调性和周期衰减。标签使用毛收益，不计算策略 Sharpe、回撤或换手。
+- `trend_trader.experiments.strategy`：必须组合至少两个因子，判断扣除交易成本后的组合
+  收益、Sharpe、最大回撤和换手率。组合信号的 IC 只作为辅助诊断。
+
+两类配置和命令分别为：
+
+```bash
+uv run trend-trader-factor-experiment \
+  configs/experiments/factor/momentum_24h_v1.yaml
+
+uv run trend-trader-strategy-experiment \
+  configs/experiments/strategy/multi_factor_linear_v1.yaml
+```
+
+原 `trend-trader-experiment` 命令保留为兼容入口，会根据 YAML 是 `factor` 还是
+`factors + combination` 自动分发。
+
+默认要求 Git 工作区干净；这样数据库中的 commit 能唯一定位代码。临时调试可在配置中
+设置 `experiment.allow_dirty_git: true`，此时仍会记录 dirty 状态和因子源码哈希，但不适合
+作为正式可复现实验。只有策略实验接受成本配置；`fee_bps` 和 `slippage_bps` 均按单边
+解释，完整持有期成本为 `2 * (fee_bps + slippage_bps)`。
+
+`start_snapshot` 标的池只使用实验开始时已知的快照并在整个实验期间固定，避免存活者偏差
+和未来信息；若本地没有对应历史快照会直接失败。需要精确复跑指定品种时，可使用
+`mode: explicit` 和 `instruments` 固定列表。
+
+每次成功实验会写入 `experiments/experiments.sqlite`，其中 `experiment_type` 明确标识
+`factor` 或 `strategy`。两类实验分别原子发布不同产物：
+
+```text
+factor_<experiment_id>/
+├── ic.csv / ic_summary.csv / overall_ic.csv
+├── factor_returns.csv / periodic_ic.csv / decay.csv
+├── quantile_returns.csv / quantile_spread.csv
+└── report.html
+
+strategy_<experiment_id>/
+├── component_factor_summary.csv
+├── signal_ic.csv / signal_ic_summary.csv
+├── combination_weights.csv / combination_diagnostics.json
+├── portfolio_returns.csv / portfolio_metrics.csv
+├── model.pkl                         # 仅模型组合
+└── report.html
+```
+
+两个目录都会包含 `config.yaml`、`summary.json`、`data_manifest.json` 和 `universe.csv`。
+数据版本是实际查询范围（包含因子预热和标签退出区间）内目录元数据的 SHA-256。摘要和
+SQLite 同时保存 Git commit、因子声明版本与源码哈希、完整配置、标的池规则和标签定义。
+策略实验另外记录成本、年化收益、Sharpe、最大回撤和换手率；组合成本按每次权重变化
+对应的换手收取，持仓不变时不会重复收取完整双边成本。
+
+## 多因子组合层
+
+`trend_trader.combinations` 把多个已完成异常值处理、标准化和可选中性化的因子合成
+一个统一信号。组合结果仍是 `ResearchDataset`，因此可以直接复用 IC、分组收益、组合
+回测和实验报告。完整线性组合配置见
+`configs/experiments/strategy/multi_factor_linear_v1.yaml`。
+
+当前内置方法覆盖常用的主要组合范式：
+
+| `combination.method` | 逻辑 |
+|---|---|
+| `rule` | 有优先级的多组 AND/OR 条件，可输出多头、空头、过滤或指定因子的分数 |
+| `linear` | 固定线性权重、截距、权重归一化和缺失值策略 |
+| `rank` | 每个时点先做横截面百分位排名，再按方向和权重合成 |
+| `ic_weighted` | 使用已经成熟的历史 Rank IC/Pearson IC 做滚动或半衰期加权 |
+| `machine_learning` | Ridge、Elastic Net、随机森林、GBDT、Histogram GBDT 的 walk-forward 预测 |
+| `deep_learning` | 可配置多层隐藏层的 MLP walk-forward 预测 |
+
+规则组合可以按顺序定义多个规则，第一条匹配规则生效：
+
+```yaml
+combination:
+  method: rule
+  name: trend_rule_signal
+  params:
+    rules:
+      - conditions:
+          - {factor: momentum_24h, operator: gt, value: 0}
+          - {factor: ma_trend, operator: gt, value: 0}
+        logic: all
+        score: 1
+      - conditions:
+          - {factor: momentum_24h, operator: lt, value: 0}
+          - {factor: ma_trend, operator: lt, value: 0}
+        logic: all
+        score: -1
+    default_score: null
+```
+
+横截面排名和滚动 IC 权重示例：
+
+```yaml
+combination:
+  method: rank
+  name: rank_score
+  params:
+    weights: {momentum_24h: 0.5, ma_trend: 0.3, liquidity: -0.2}
+    missing: drop
+```
+
+或使用动态 IC 权重：
+
+```yaml
+combination:
+  method: ic_weighted
+  name: rolling_ic_score
+  training_horizon: 4
+  params:
+    window: 60
+    min_periods: 20
+    min_cross_section: 20
+    ic_method: spearman
+    normalization: sum_abs  # 也支持 equal_sign、long_only、softmax
+    half_life: 20
+    missing: renormalize
+```
+
+机器学习和神经网络必须设置 walk-forward 训练门槛。默认在标签退出价格出现后再等待
+1 根 K 线，每个预测时刻只使用满足
+`exit_time + label_lag + embargo <= prediction_time` 的样本。这避免观察某根开盘价后，
+又假设能够按同一个开盘价成交；`label_lag_bars` 至少为 1：
+
+```yaml
+combination:
+  method: machine_learning
+  name: gbdt_score
+  training_horizon: 4
+  params:
+    model: random_forest  # ridge/elastic_net/gradient_boosting/hist_gradient_boosting
+    model_params: {n_estimators: 300, max_depth: 6, random_state: 42}
+    min_train_observations: 5000
+    min_train_periods: 240
+    train_window_periods: 8760
+    retrain_every: 168
+    embargo_bars: 1
+```
+
+多层感知机配置：
+
+```yaml
+combination:
+  method: deep_learning
+  name: mlp_score
+  training_horizon: 4
+  params:
+    model_params:
+      hidden_layer_sizes: [128, 64, 32]
+      activation: relu
+      early_stopping: true
+      max_iter: 500
+    min_train_observations: 5000
+    min_train_periods: 240
+    retrain_every: 168
+```
+
+实验产物会额外保存 `combination_weights.csv`、`combination_diagnostics.json`，模型类
+方法还会保存最终的 `model.pkl`。Pickle 只应从可信的本地实验目录加载。组合方式通过
+`FactorCombiner` 和 `FactorCombinationRegistry` 注册，便于继续接入 XGBoost、LightGBM、
+PyTorch 或自定义优化器，而不改变实验和评价层。

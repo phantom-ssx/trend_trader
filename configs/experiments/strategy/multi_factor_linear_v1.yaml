@@ -1,0 +1,61 @@
+experiment:
+  name: multi_factor_linear_v1
+  allow_dirty_git: false
+
+data:
+  start: "2023-01-01"
+  end: "2026-01-01"
+  timeframe: "1h"
+  universe:
+    mode: start_snapshot
+    venue: OKX
+    min_quote_volume_24h: 5000000
+    min_listing_days: 90
+    top_n_by_volume: 50
+
+factors:
+  - name: momentum
+    alias: momentum_24h
+    params:
+      lookback: 24
+  - name: ma_spread
+    alias: ma_trend
+    params:
+      fast_period: 8
+      slow_period: 24
+  - name: amihud
+    alias: liquidity
+    params:
+      period: 24
+
+combination:
+  method: linear
+  name: trend_liquidity_score
+  training_horizon: 4
+  params:
+    weights:
+      momentum_24h: 0.5
+      ma_trend: 0.3
+      liquidity: -0.2
+    normalize_weights: true
+    missing: drop
+
+label:
+  price: next_open
+  horizons: [1, 4, 8, 24]
+
+preprocess:
+  winsorize:
+    lower: 0.01
+    upper: 0.99
+  normalize: zscore
+
+evaluation:
+  quantiles: 5
+  ic_method: spearman
+  min_cross_section: 5
+  primary_horizon: 4
+
+cost:
+  fee_bps: 5
+  slippage_bps: 3

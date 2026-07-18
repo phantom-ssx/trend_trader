@@ -8,13 +8,16 @@ dependencies = [
     "ccxt>=4.4.0",
     "httpx>=0.27.0",
     "nautilus-trader>=1.200.0",
+    "numpy>=2.0.0",
     "pandas>=2.2.0",
     "polars>=1.0.0",
     "pyarrow>=16.0.0",
     "pydantic>=2.7.0",
     "pydantic-settings>=2.3.0",
+    "pyyaml>=6.0.2",
     "python-dotenv>=1.0.1",
     "rich>=13.7.0",
+    "scikit-learn>=1.6.0",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +31,9 @@ trend-trader-download = "trend_trader.data.okx_candles:main"
 trend-trader-funding-download = "trend_trader.data.okx_funding_rates:main"
 trend-trader-universe-update = "trend_trader.data.universe:main"
 trend-trader-history-download = "trend_trader.data.history:main"
+trend-trader-experiment = "trend_trader.experiments.runner:main"
+trend-trader-factor-experiment = "trend_trader.experiments.factor.runner:main"
+trend-trader-strategy-experiment = "trend_trader.experiments.strategy.runner:main"
 trend-trader-chart = "trend_trader.visualization.candlestick_chart:main"
 trend-trader-backtest = "trend_trader.backtest.run_backtest:main"
 trend-trader-paper = "trend_trader.live.paper:main"
