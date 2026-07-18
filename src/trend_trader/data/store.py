@@ -342,6 +342,38 @@ class ParquetStore:
                 source_name=source_name,
             )
 
+    def write_observed(
+        self,
+        frame: pl.DataFrame,
+        *,
+        data_type: DataType,
+        venue: str,
+        instrument_id: str,
+        bar_type: str | None,
+        source_name: str,
+    ) -> None:
+        """Persist partial source results and catalog only intervals actually observed."""
+
+        normalized = canonicalize_frame(frame, data_type)
+        if normalized.is_empty():
+            return
+        self.write(
+            normalized,
+            data_type=data_type,
+            venue=venue,
+            instrument_id=instrument_id,
+            bar_type=bar_type,
+            source_name=source_name,
+        )
+        self._rebuild_coverage(
+            normalized,
+            data_type=data_type,
+            venue=venue,
+            instrument_id=instrument_id,
+            bar_type=bar_type,
+            source_name=source_name,
+        )
+
     @contextmanager
     def _partition_lock(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)

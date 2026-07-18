@@ -5,6 +5,7 @@ __pycache__/
 .env
 data/raw/
 data/clean/
+data/market/
 outputs/
 *.pyc
 .idea/

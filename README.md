@@ -253,6 +253,23 @@ lifecycle = data.instrument_lifecycle(venue="OKX", rebuild=True)
 时间来自交易所字段、每日快照还是首末 K 线。由 K 线推导的数据只能证明本地
 观测到的交易区间，精度不等同于交易所官方上下线时间。
 
+### 批量维护成交量前 N 个合约
+
+下面的命令刷新当前仍在交易的 USDT 线性永续合约，按 24 小时美元成交额选出
+前 50，并从各合约的 `max(2020-01-01, 上市时间)` 开始维护全部已支持数据：
+
+```bash
+uv run trend-trader-history-download \
+  --start 2020-01-01T00:00:00Z \
+  --top-n 50
+```
+
+任务按数据类型、合约和月份独立保存，可安全中断并重复执行。已完整覆盖的区间
+会直接跳过，接口只能返回部分记录时也会保存实际取得的数据。执行状态保存在
+`data/market/v1/maintenance/top_volume_history.json`。资金费率只请求最近约 92 天、
+强平只请求最近 3 天；其他指标会尽量向前回补。市值数据需要 CoinGecko API key，
+且尚未配置 symbol 到 CoinGecko coin id 的币种会记录失败，不会中止其他下载。
+
 ## 回测
 
 ```bash
