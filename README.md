@@ -520,3 +520,209 @@ uv run trend-trader-live \
 当前项目已按 `nautilus-trader==1.230.0` 验证 OKX adapter 类名：
 `OKXDataClientConfig`、`OKXExecClientConfig`、`OKXLiveDataClientFactory`、
 `OKXLiveExecClientFactory`。
+
+## 统一因子层
+
+`trend_trader.factors` 基于统一数据查询层按需计算因子，自动加载预热区间，并将
+Funding、市值等低频数据向后 as-of 对齐到 K 线时间轴。强平事件按左闭右开 K 线
+窗口聚合。任何低频数据都不会向前匹配未来值。结果中的 `timestamp` 是因子的
+可用时刻：例如使用 `[00:00, 01:00)` 小时 K 线计算出的值标记为 `01:00`。
+
+```python
+from trend_trader.factors import (
+    FactorClient,
+    FactorRequest,
+    FactorSpec,
+    OutlierConfig,
+    ProcessingConfig,
+    StandardizeConfig,
+)
+
+factors = FactorClient()
+result = factors.query(
+    FactorRequest(
+        factors=(
+            FactorSpec("momentum", {"lookback": "24h"}),
+            FactorSpec("ma_spread", {"fast_period": 5, "slow_period": 20}),
+            FactorSpec("atr", {"period": 14}),
+            FactorSpec("taker_imbalance"),
+        ),
+        instrument_ids=("BTC-USDT-SWAP", "ETH-USDT-SWAP"),
+        bar_type="1h",
+        start="2026-07-01T00:00:00Z",
+        end="2026-07-10T00:00:00Z",
+        processing=ProcessingConfig(
+            outlier=OutlierConfig(method="mad", threshold=5),
+            standardize=StandardizeConfig(
+                method="zscore",
+                scope="cross_sectional",
+                min_cross_section=2,
+            ),
+        ),
+    )
+)
+
+long_frame = result.frame
+wide_frame = result.to_wide()
+```
+
+当前注册的因子包括：
+
+- 价格趋势：`momentum`、`ma_spread`、`trend_slope`、`breakout`、
+  `mean_reversion`。
+- 波动率：`historical_volatility`、`atr`、`volatility_change`、
+  `up_down_volatility_asymmetry`。
+- 成交和流动性：`volume_change`、`turnover`、`amihud`、
+  `volume_price_divergence`。
+- 衍生品和规模：`funding_rate`、`basis`、`open_interest`、`market_cap`、
+  `long_short_ratio`、`liquidation_imbalance`、`taker_imbalance`。
+
+处理流水线依次执行非有限值过滤、异常值处理、标准化和可选截面中性化。
+中性化暴露使用注册因子的原始值，例如：
+
+```python
+from trend_trader.factors import NeutralizeConfig
+
+processing = ProcessingConfig(
+    neutralize=NeutralizeConfig(exposures=("market_cap",)),
+)
+```
+
+结果同时保留 `raw_value` 和最终 `value`。预热不足、截面样本不足或中性化失败时，
+`is_valid` 为 false，并通过 `quality_flags` 给出原因；因子层不会默认使用零填补无效值。
+
+## 因子研究层
+
+`trend_trader.research` 将因子与未来可执行收益连接。标签遵循下一根 K 线开盘入场、
+持有指定 bar 后按开盘价退出的语义。若信号来自第 `t` 根 K 线，持有 `h` 根的标签为：
+
+```text
+open(t + 1 + h) / open(t + 1) - 1
+```
+
+`FactorClient` 的结果时间已经是因子可用时刻，因此标签实现中等价为
+`open(T + h) / open(T) - 1`，不会再次额外偏移一根 K 线。
+
+```python
+from trend_trader.factors import FactorRequest, FactorSpec
+from trend_trader.research import (
+    ExecutionReturnSpec,
+    FactorAnalyzer,
+    FactorResearchClient,
+)
+
+request = FactorRequest(
+    factors=(
+        FactorSpec("momentum", {"lookback": "24h"}),
+        FactorSpec("atr", {"period": 14}),
+        FactorSpec("basis"),
+    ),
+    instrument_ids=("BTC-USDT-SWAP", "ETH-USDT-SWAP"),
+    bar_type="1h",
+    start="2026-01-01T00:00:00Z",
+    end="2026-04-01T00:00:00Z",
+)
+
+research = FactorResearchClient()
+dataset = research.build(
+    request,
+    labels=(
+        ExecutionReturnSpec(horizon_bars=1, round_trip_cost_bps=8),
+        ExecutionReturnSpec(horizon_bars=4, round_trip_cost_bps=8),
+        ExecutionReturnSpec(horizon_bars=24, round_trip_cost_bps=8),
+    ),
+)
+
+analyzer = FactorAnalyzer(dataset)
+report = analyzer.run(
+    method="spearman",
+    min_cross_section=2,
+    quantiles=2,
+    stability_period="1mo",
+)
+```
+
+标准报告包含：
+
+- `summary`：覆盖率、有效样本数、因子和标签描述统计。
+- `overall_ic`：全样本 Pearson IC 或 Rank IC。
+- `ic_series` / `ic_summary`：逐时点截面 IC、ICIR、t 值和正 IC 比例。
+- `factor_returns` / `factor_return_summary`：逐时点单因子截面回归收益及显著性。
+- `quantile_returns` / `quantile_spread`：分组收益、胜率、单调性和多空收益。
+- `periodic_ic`：按月或其它周期检查稳定性。
+- `decay`：比较不同预测周期的 IC 和多空收益衰减。
+- `factor_correlation`：因子间相关性，帮助识别冗余因子。
+- `autocorrelation`：因子持续性，可作为换手率的近似指标。
+
+单独调用分析方法时可以选择截面或时间序列分组：
+
+```python
+rank_ic = analyzer.overall_ic(method="spearman")
+monthly_ic = analyzer.periodic_ic(every="1mo")
+time_series_groups = analyzer.quantile_returns(
+    quantiles=5,
+    scope="time_series",
+)
+```
+
+标签结果同时保存毛收益、扣除预估双边成本后的净收益、入场/退出时间和价格。研究
+数据的 `label_value` 默认使用净收益。数据缺口导致退出时间不连续时，标签会标记为
+`NON_CONTIGUOUS_HORIZON`，不会跨缺失 K 线错误地执行 `shift`。
+
+训练和验证切分时，可以清除所有退出时间跨越验证起点的训练标签，并设置 embargo：
+
+```python
+from datetime import UTC, datetime, timedelta
+
+training, validation = dataset.purged_time_split(
+    datetime(2026, 3, 1, tzinfo=UTC),
+    embargo=timedelta(hours=24),
+)
+```
+
+### 因子冗余和独特贡献
+
+两两相关性只能发现直接重复。需要判断一个因子在控制其它因子后是否仍然提供信息时，
+显式运行冗余报告：
+
+```python
+redundancy = analyzer.redundancy_report(
+    method="spearman",
+    min_observations=20,
+    cluster_threshold=0.8,
+)
+
+vif = redundancy.vif
+unique = redundancy.unique_contribution
+unique_summary = redundancy.unique_contribution_summary
+clusters = redundancy.clusters
+```
+
+报告包含：
+
+- `vif`：把每个因子对其余因子回归，计算方差膨胀系数。默认将 `VIF >= 5`
+  标记为 `MODERATE`，`VIF >= 10` 标记为 `HIGH`。
+- `unique_contribution`：每个时点先用控制因子解释目标因子，再计算残差与未来收益的
+  条件 IC；同时比较加入目标因子前后的 `R²`，输出 `incremental_r_squared`。
+- `unique_contribution_summary`：汇总条件 IC、条件 IC t 值、正 IC 比例以及平均增量
+  `R²`。若原始 IC 较高但条件 IC和增量 `R²` 接近零，说明预测能力很可能已被其它
+  因子覆盖。
+- `clusters`：对绝对相关性超过阈值的因子构建连通分组，并按平均绝对 IC 从每组选择
+  一个代表因子。
+
+也可以只检验一个新因子相对于指定基线因子的增量贡献：
+
+```python
+incremental = analyzer.unique_contribution(
+    target_factors=("momentum[lookback=24h]",),
+    control_factors=(
+        "ma_spread[fast_period=5,slow_period=20]",
+        "trend_slope[period=20]",
+    ),
+    method="spearman",
+    min_observations=20,
+)
+```
+
+高级冗余分析按时点执行多次截面回归，计算成本高于普通 IC，因此不会在
+`FactorAnalyzer.run()` 中默认执行，需要显式调用 `redundancy_report()`。
