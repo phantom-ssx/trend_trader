@@ -11,6 +11,7 @@ from rich.table import Table
 
 from trend_trader.backtest.metrics import annualized_sharpe_ratio
 from trend_trader.config.models import load_backtest_config
+from trend_trader.data.schema import legacy_candle_view
 
 console = Console()
 
@@ -32,7 +33,7 @@ class FilterBacktestResult:
 
 
 def load_hourly_data(parquet_path: Path, resample: str = "1h") -> pd.DataFrame:
-    df = pl.read_parquet(parquet_path)
+    df = legacy_candle_view(pl.read_parquet(parquet_path))
     required = {"ts", "open", "high", "low", "close", "volume"}
     missing = required.difference(df.columns)
     if missing:

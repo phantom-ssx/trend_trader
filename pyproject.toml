@@ -26,6 +26,7 @@ dev = [
 [project.scripts]
 trend-trader-download = "trend_trader.data.okx_candles:main"
 trend-trader-funding-download = "trend_trader.data.okx_funding_rates:main"
+trend-trader-universe-update = "trend_trader.data.universe:main"
 trend-trader-chart = "trend_trader.visualization.candlestick_chart:main"
 trend-trader-backtest = "trend_trader.backtest.run_backtest:main"
 trend-trader-paper = "trend_trader.live.paper:main"

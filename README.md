@@ -61,7 +61,7 @@ uv run trend-trader-download \
 
 输出字段：
 
-`ts, open, high, low, close, volume, volume_ccy, volume_quote, confirm, exchange, inst_id, bar`
+`venue, instrument_id, bar_type, timestamp, open, high, low, close, volume, volume_ccy, volume_quote, confirm`
 
 ## 下载 OKX 历史资金费率
 
@@ -76,7 +76,7 @@ uv run trend-trader-funding-download \
 目前仅返回最近约三个月的历史记录；即使指定更早的开始时间，输出仍受该保留窗口限制。
 输出字段为：
 
-`ts, funding_rate, realized_rate, method, formula_type, exchange, inst_id`
+`venue, instrument_id, timestamp, funding_rate, realized_rate, method, formula_type`
 
 ## 统一数据查询 API
 
@@ -88,33 +88,170 @@ from trend_trader.data import MarketDataClient
 
 data = MarketDataClient()
 
-# 从 OKX REST 查询 K 线
+# 查询层优先读取本地数据，缺失区间自动从 OKX 下载并保存
 candles = data.candles(
     "ETH-USDT-SWAP",
-    "1H",
+    "1h",
     "2026-07-01T00:00:00Z",
     "2026-07-02T00:00:00Z",
+    venue="OKX",
 )
 
-# 从 OKX REST 查询资金费率
+# 使用方不需要指定数据源或文件路径
 funding = data.funding_rates(
     "ETH-USDT-SWAP",
     "2026-07-01T00:00:00Z",
     "2026-07-02T00:00:00Z",
-)
-
-# 同一 API 也可以读取本地 Parquet，并自动按时间、交易所、合约和周期过滤
-local_candles = data.candles(
-    "ETH-USDT-SWAP",
-    "1H",
-    "2026-07-01T00:00:00Z",
-    "2026-07-02T00:00:00Z",
-    path="data/clean/okx/ETH-USDT-SWAP/hourly.parquet",
+    venue="OKX",
 )
 ```
 
+查询层只持久化 1 分钟 K 线；查询 `15m`、`1h`、`1d` 等周期时，会在完整的
+本地 1 分钟数据上聚合。K 线按月分区，资金费率按年分区，默认存储根目录为
+`data/market/v1`，覆盖区间记录在 `catalog.sqlite`。Parquet 文件本身包含
+`venue`、`instrument_id`、`bar_type` 和 `timestamp` 主键列。
+
 异步程序使用 `await data.query_async(DataQuery(...))`。新增交易所或数据库时，
 实现 `DataSource` 协议并通过 `data.register(source)` 注册即可，上层 API 不需要改变。
+
+### 衍生品与市场指标
+
+查询层还支持以下数据，仍然遵循“本地优先、缺口下载、自动持久化”：
+
+```python
+# 指定合约的标记价相对指数价基差；底层保存 1m
+basis = data.contract_basis(
+    "ETH-USDT-SWAP", "1h",
+    "2026-07-01T00:00:00Z", "2026-07-02T00:00:00Z",
+)
+
+# OKX 可回溯接口提供币种级合约持仓量（USD）和成交量（USD）；底层保存 5m
+open_interest = data.open_interest(
+    "ETH-USDT-SWAP", "1h",
+    "2026-07-01T00:00:00Z", "2026-07-02T00:00:00Z",
+)
+
+long_short = data.long_short_ratio(
+    "ETH-USDT-SWAP", "1h",
+    "2026-07-01T00:00:00Z", "2026-07-02T00:00:00Z",
+)
+
+taker = data.taker_volume(
+    "ETH-USDT-SWAP", "1h",
+    "2026-07-01T00:00:00Z", "2026-07-02T00:00:00Z",
+)
+
+# 强平是事件数据，没有 bar_type。OKX 公共接口仅保留最近约 3 天。
+liquidations = data.liquidations(
+    "ETH-USDT-SWAP",
+    "2026-07-17T00:00:00Z", "2026-07-18T00:00:00Z",
+)
+```
+
+市值是全市场资产指标，使用 `venue="GLOBAL"`，按日保存。CoinGecko 当前要求
+Demo 或 Pro API key，使用前设置：
+
+```bash
+# Demo key
+export COINGECKO_API_KEY="..."
+
+# 或 Pro key
+export COINGECKO_PRO_API_KEY="..."
+```
+
+```python
+market_cap = data.market_cap(
+    "ETH",
+    "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z",
+)
+```
+
+新增数据的主要字段：
+
+| 数据类型 | 数值字段 | 本地基础粒度 |
+|---|---|---:|
+| `contract_basis` | `mark_price, index_price, basis, basis_rate` | `1m` |
+| `open_interest` | `open_interest_usd, volume_usd` | `5m` |
+| `long_short_ratio` | `long_short_ratio` | `5m` |
+| `market_cap` | `market_cap_usd, price_usd, volume_24h_usd` | `1d` |
+| `liquidations` | `liquidation_id, side, position_side, bankruptcy_price, size, bankruptcy_loss` | 事件级 |
+| `taker_volume` | `buy_volume, sell_volume, net_buy_volume` | `5m` |
+
+周期型指标查询更高周期时，主动买卖量使用求和聚合，其余指标取窗口内最后值。
+强平数据使用稳定生成的 `liquidation_id` 去重。受上游历史保留窗口限制且本地没有
+覆盖时，查询会明确报出缺失区间，不会静默返回不完整数据。
+
+## 多币种标的池与历史快照
+
+标的池维护独立于单合约行情查询。一次维护会读取 OKX 当前的合约配置、ticker
+和持仓量，保存完整截面，重建合约生命周期，然后使用同一时点的信息筛选并保存
+交易标的池：
+
+```python
+from trend_trader.data import MarketDataClient
+
+data = MarketDataClient()
+
+universe = data.maintain_universe(
+    venue="OKX",
+    instrument_type="SWAP",
+    settle_currency="USDT",
+    contract_type="linear",
+    min_listing_days=30,
+    min_volume_usd_24h=20_000_000,
+    min_open_interest_usd=10_000_000,
+    max_spread_bps=30,
+    top_n=30,
+)
+
+instrument_ids = universe["instrument_id"].to_list()
+```
+
+也可以通过命令定时维护，推荐每天运行一次：
+
+```bash
+uv run trend-trader-universe-update \
+  --min-listing-days 30 \
+  --min-volume-usd-24h 20000000 \
+  --top-n 30
+```
+
+本地目录为：
+
+```text
+data/market/v1/
+├── instruments/             # 每次抓取的完整交易所截面，按日期分区
+├── instrument_lifecycle/    # 上线、下线有效区间及推导来源
+└── universes/               # 最终可交易集合，按名称、交易所和日期分区
+```
+
+查询历史时点只会读取该时点之前最近的快照，不会使用未来快照：
+
+```python
+historical = data.trading_universe(
+    "2024-01-01T00:00:00Z",
+    min_listing_days=30,
+    top_n=30,
+)
+
+# 直接读取已经固化的标的池，不重新执行筛选
+saved = data.saved_universe(
+    "2024-01-01T00:00:00Z",
+    name="okx_usdt_linear_swaps",
+)
+```
+
+OKX 合约接口只提供当前截面，不能把今天的数据写成历史快照。因此只有当前时间
+可以执行在线刷新；过去缺少快照时，可用已有 1 分钟 K 线的首末时间重建近似
+生命周期：
+
+```python
+lifecycle = data.instrument_lifecycle(venue="OKX", rebuild=True)
+```
+
+生命周期中的 `valid_from_source`、`valid_to_source` 和 `confidence` 会明确标记
+时间来自交易所字段、每日快照还是首末 K 线。由 K 线推导的数据只能证明本地
+观测到的交易区间，精度不等同于交易所官方上下线时间。
 
 ## 回测
 

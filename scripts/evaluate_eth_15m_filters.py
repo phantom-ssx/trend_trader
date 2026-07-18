@@ -6,6 +6,8 @@ from pathlib import Path
 import pandas as pd
 import polars as pl
 
+from trend_trader.data.schema import legacy_candle_view
+
 try:
     from scripts.evaluate_eth_filters import (
         DEFAULT_PARQUET,
@@ -46,7 +48,7 @@ def parse_thresholds(value: str) -> list[float]:
 
 def load_15min(parquet_path: Path) -> pd.DataFrame:
     """Aggregate source candles to closed-left 15-minute OHLCV bars."""
-    frame = pl.read_parquet(parquet_path)
+    frame = legacy_candle_view(pl.read_parquet(parquet_path))
     candles = (
         frame.sort("ts")
         .group_by_dynamic("ts", every="15m", closed="left")
@@ -199,8 +201,5 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-
-
 # 对于15分钟策略，如果使用ma5/ma20，指标过于灵敏。会反复下单，亏空手续费；
-
-# uv run python scripts/evaluate_eth_15m_filters.py --ma-pairs 24:80,28:80,32:80 --filter-grid --spread-thresholds 0.001,0.0015,0.002,0.0025,0.003 --atr-thresholds 0.003,0.004,0.005 --start 2026-01-01 --end 2026-07-08 --limit 12 | awk -F, '{print $1, $5, $4}' | column -t
+# 可通过 --ma-pairs、--spread-thresholds 和 --atr-thresholds 批量评估参数组合。

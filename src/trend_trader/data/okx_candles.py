@@ -115,7 +115,10 @@ def build_frame(rows: list[list[str]], inst_id: str, bar: str) -> pl.DataFrame:
     if not rows:
         return pl.DataFrame(
             schema={
-                "ts": pl.Datetime(time_unit="ms", time_zone="UTC"),
+                "venue": pl.Utf8,
+                "instrument_id": pl.Utf8,
+                "bar_type": pl.Utf8,
+                "timestamp": pl.Datetime(time_unit="ms", time_zone="UTC"),
                 "open": pl.Float64,
                 "high": pl.Float64,
                 "low": pl.Float64,
@@ -124,9 +127,6 @@ def build_frame(rows: list[list[str]], inst_id: str, bar: str) -> pl.DataFrame:
                 "volume_ccy": pl.Float64,
                 "volume_quote": pl.Float64,
                 "confirm": pl.Int8,
-                "exchange": pl.Utf8,
-                "inst_id": pl.Utf8,
-                "bar": pl.Utf8,
             }
         )
 
@@ -158,14 +158,19 @@ def build_frame(rows: list[list[str]], inst_id: str, bar: str) -> pl.DataFrame:
             pl.col("confirm").cast(pl.Int8),
         )
         .with_columns(
-            pl.from_epoch("ts_ms", time_unit="ms").dt.replace_time_zone("UTC").alias("ts"),
-            pl.lit("OKX").alias("exchange"),
-            pl.lit(inst_id).alias("inst_id"),
-            pl.lit(bar).alias("bar"),
+            pl.from_epoch("ts_ms", time_unit="ms")
+            .dt.replace_time_zone("UTC")
+            .alias("timestamp"),
+            pl.lit("OKX").alias("venue"),
+            pl.lit(inst_id).alias("instrument_id"),
+            pl.lit(bar).str.to_lowercase().alias("bar_type"),
         )
         .drop("ts_ms")
         .select(
-            "ts",
+            "venue",
+            "instrument_id",
+            "bar_type",
+            "timestamp",
             "open",
             "high",
             "low",
@@ -174,9 +179,6 @@ def build_frame(rows: list[list[str]], inst_id: str, bar: str) -> pl.DataFrame:
             "volume_ccy",
             "volume_quote",
             "confirm",
-            "exchange",
-            "inst_id",
-            "bar",
         )
     )
 
@@ -186,8 +188,8 @@ def clean_candles(df: pl.DataFrame, start_ms: int, end_ms: int) -> pl.DataFrame:
         return df
     return (
         df.filter(
-            (pl.col("ts").dt.timestamp("ms") >= start_ms)
-            & (pl.col("ts").dt.timestamp("ms") < end_ms)
+            (pl.col("timestamp").dt.timestamp("ms") >= start_ms)
+            & (pl.col("timestamp").dt.timestamp("ms") < end_ms)
             & (pl.col("open") > 0)
             & (pl.col("high") > 0)
             & (pl.col("low") > 0)
@@ -195,8 +197,8 @@ def clean_candles(df: pl.DataFrame, start_ms: int, end_ms: int) -> pl.DataFrame:
             & (pl.col("high") >= pl.max_horizontal("open", "close", "low"))
             & (pl.col("low") <= pl.min_horizontal("open", "close", "high"))
         )
-        .unique(subset=["ts"], keep="last")
-        .sort("ts")
+        .unique(subset=["venue", "instrument_id", "bar_type", "timestamp"], keep="last")
+        .sort("timestamp")
     )
 
 

@@ -10,6 +10,7 @@ from rich.table import Table
 
 from trend_trader.backtest.metrics import annualized_sharpe_ratio
 from trend_trader.config.models import load_backtest_config
+from trend_trader.data.schema import legacy_candle_view
 from trend_trader.strategies.demo_ema_cross import DemoEmaCrossSignal
 
 console = Console()
@@ -270,7 +271,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     config = load_backtest_config(args.config)
-    df = pl.read_parquet(config.data.parquet_path)
+    df = legacy_candle_view(pl.read_parquet(config.data.parquet_path))
     required = {"ts", "open", "high", "low", "close", "volume"}
     missing = required.difference(df.columns)
     if missing:

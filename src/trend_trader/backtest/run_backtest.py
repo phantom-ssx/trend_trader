@@ -15,6 +15,7 @@ from trend_trader.backtest.nautilus_engine import (
     run_nautilus_backtest,
 )
 from trend_trader.config.models import load_backtest_config
+from trend_trader.data.schema import legacy_candle_view
 from trend_trader.io.csv_export import CsvColumn, CsvExporter, int_sort_value, unix_nanos_to_iso
 
 console = Console()
@@ -129,7 +130,7 @@ def main() -> None:
     if strategy_name not in available_nautilus_strategy_names():
         supported = ", ".join(available_nautilus_strategy_names())
         raise ValueError(f"strategy.name must be one of: {supported}")
-    df = pl.read_parquet(config.data.parquet_path)
+    df = legacy_candle_view(pl.read_parquet(config.data.parquet_path))
     required = {"ts", "open", "high", "low", "close", "volume"}
     missing = required.difference(df.columns)
     if missing:

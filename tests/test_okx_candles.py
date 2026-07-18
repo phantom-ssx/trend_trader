@@ -22,6 +22,7 @@ def test_build_and_clean_candles_deduplicates_and_sorts() -> None:
 
     assert cleaned.height == 2
     assert cleaned["close"].to_list() == [11.0, 12.0]
+    assert cleaned.columns[:4] == ["venue", "instrument_id", "bar_type", "timestamp"]
 
 
 def test_default_output_path_includes_time_range() -> None:

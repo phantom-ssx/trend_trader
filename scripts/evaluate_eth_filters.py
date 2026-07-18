@@ -9,6 +9,7 @@ import pandas as pd
 import polars as pl
 
 from trend_trader.backtest.metrics import annualized_sharpe_ratio, timestamps_or_daily_index
+from trend_trader.data.schema import legacy_candle_view
 
 DEFAULT_PARQUET = Path(
     "data/clean/okx/ETH-USDT-SWAP/"
@@ -50,7 +51,7 @@ def load_hourly(
     fast_period: int = 5,
     slow_period: int = 20,
 ) -> pd.DataFrame:
-    df = pl.read_parquet(parquet_path)
+    df = legacy_candle_view(pl.read_parquet(parquet_path))
     hourly = (
         df.sort("ts")
         .group_by_dynamic("ts", every="1h", closed="left")

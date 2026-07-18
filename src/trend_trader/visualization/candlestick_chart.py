@@ -8,6 +8,8 @@ from pathlib import Path
 import polars as pl
 from rich.console import Console
 
+from trend_trader.data.schema import legacy_candle_view
+
 console = Console()
 
 DEFAULT_MA_PERIODS = (5, 10, 20)
@@ -37,7 +39,7 @@ def load_candles(
     end: datetime | None = None,
     resample: str | None = None,
 ) -> pl.DataFrame:
-    df = pl.read_parquet(parquet_path)
+    df = legacy_candle_view(pl.read_parquet(parquet_path))
     required = {"ts", "open", "high", "low", "close", "volume"}
     missing = required.difference(df.columns)
     if missing:

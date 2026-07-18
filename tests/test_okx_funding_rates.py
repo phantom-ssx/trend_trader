@@ -18,5 +18,5 @@ def test_build_frame_normalizes_funding_rate_rows() -> None:
     assert frame.height == 1
     assert frame["funding_rate"].to_list() == [0.0001]
     assert frame["realized_rate"].to_list() == [0.00009]
-    assert frame["exchange"].to_list() == ["OKX"]
-    assert frame["inst_id"].to_list() == ["ETH-USDT-SWAP"]
+    assert frame["venue"].to_list() == ["OKX"]
+    assert frame["instrument_id"].to_list() == ["ETH-USDT-SWAP"]

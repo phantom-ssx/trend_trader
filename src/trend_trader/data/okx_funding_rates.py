@@ -21,13 +21,13 @@ console = Console()
 
 def build_frame(rows: list[dict[str, str]], inst_id: str) -> pl.DataFrame:
     schema = {
-        "ts": pl.Datetime(time_unit="ms", time_zone="UTC"),
+        "venue": pl.Utf8,
+        "instrument_id": pl.Utf8,
+        "timestamp": pl.Datetime(time_unit="ms", time_zone="UTC"),
         "funding_rate": pl.Float64,
         "realized_rate": pl.Float64,
         "method": pl.Utf8,
         "formula_type": pl.Utf8,
-        "exchange": pl.Utf8,
-        "inst_id": pl.Utf8,
     }
     if not rows:
         return pl.DataFrame(schema=schema)
@@ -52,9 +52,11 @@ def build_frame(rows: list[dict[str, str]], inst_id: str) -> pl.DataFrame:
             pl.col("formula_type").cast(pl.Utf8),
         )
         .with_columns(
-            pl.from_epoch("ts_ms", time_unit="ms").dt.replace_time_zone("UTC").alias("ts"),
-            pl.lit("OKX").alias("exchange"),
-            pl.lit(inst_id).alias("inst_id"),
+            pl.from_epoch("ts_ms", time_unit="ms")
+            .dt.replace_time_zone("UTC")
+            .alias("timestamp"),
+            pl.lit("OKX").alias("venue"),
+            pl.lit(inst_id).alias("instrument_id"),
         )
         .drop("ts_ms")
         .select(*schema)
@@ -120,11 +122,11 @@ async def fetch_funding_rates(
         return frame
     return (
         frame.filter(
-            (pl.col("ts").dt.timestamp("ms") >= start_ms)
-            & (pl.col("ts").dt.timestamp("ms") < end_ms)
+            (pl.col("timestamp").dt.timestamp("ms") >= start_ms)
+            & (pl.col("timestamp").dt.timestamp("ms") < end_ms)
         )
-        .unique(subset=["ts"], keep="last")
-        .sort("ts")
+        .unique(subset=["venue", "instrument_id", "timestamp"], keep="last")
+        .sort("timestamp")
     )
 
 

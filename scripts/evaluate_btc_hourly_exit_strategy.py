@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
+from trend_trader.data.schema import legacy_candle_view
+
 DEFAULT_DATA_DIRECTORY = Path("data/clean/okx/BTC-USDT-SWAP")
 DEFAULT_OUTPUT = Path("outputs/btc_hourly_exit_parameter_grid.csv")
 DEFAULT_YEARS = list(range(2020, 2027))
@@ -41,7 +43,9 @@ def load_history(data_directory: Path, years: list[int]) -> pd.DataFrame:
         path = next((candidate for candidate in candidates if candidate.exists()), None)
         if path is None:
             raise FileNotFoundError(f"No BTC candle file found for {year}: {candidates}")
-        frame = pl.read_parquet(path).select("ts", "open", "high", "low", "close", "volume")
+        frame = legacy_candle_view(pl.read_parquet(path)).select(
+            "ts", "open", "high", "low", "close", "volume"
+        )
         if frame.height > 10_000:
             frame = (
                 frame.sort("ts")
