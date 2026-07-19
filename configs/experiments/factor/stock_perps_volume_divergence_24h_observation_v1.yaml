@@ -1,0 +1,21 @@
+experiment: {name: stock_perps_volume_divergence_24h_observation_v1, allow_dirty_git: true}
+data:
+  start: "2026-05-15"
+  end: "2026-07-11"
+  timeframe: "1h"
+  universe:
+    mode: explicit
+    venue: OKX
+    instruments: [AAPL-USDT-SWAP, AMD-USDT-SWAP, GOOGL-USDT-SWAP, MU-USDT-SWAP, NVDA-USDT-SWAP, SNDK-USDT-SWAP, SPCX-USDT-SWAP]
+factor: {name: volume_price_divergence, params: {period: 24}}
+label: {price: next_open, horizons: [1, 4, 24]}
+preprocess:
+  winsorize: {lower: 0.01, upper: 0.99}
+  normalize: zscore
+evaluation:
+  quantiles: 3
+  ic_method: spearman
+  min_cross_section: 5
+  stability_period: 1mo
+  stability_min_observations: 20
+  primary_horizon: 24

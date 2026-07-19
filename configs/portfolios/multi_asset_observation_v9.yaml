@@ -1,0 +1,124 @@
+portfolio:
+  name: multi_asset_observation_v9
+  as_of: "2026-07-19"
+  production_reference: strategy_low_leverage_diversified_v8
+  candidate_reference: strategy_multi_asset_v9
+  fee_bps_per_side: 5
+  slippage_bps_per_side: 3
+  funding_cost_required_before_activation: true
+
+limits:
+  crypto_candidate_total_weight: 0.10
+  doge_max_weight: 0.02
+  stock_perpetual_total_weight: 0.10
+  stock_perpetual_single_weight: 0.02
+  commodity_total_weight: 0.10
+  commodity_single_weight: 0.07
+  new_listing_max_weight: 0.02
+  target_portfolio_leverage_ceiling: 2.50
+
+activation_rules:
+  minimum_history_days:
+    mature_crypto: 730
+    commodity: 365
+    new_listing: 180
+  minimum_out_of_sample_days: 90
+  require_positive_out_of_sample_return: true
+  require_funding_adjusted_return: true
+  maximum_out_of_sample_drawdown: 0.25
+  minimum_positive_month_rate: 0.55
+  reject_on_data_gaps: true
+
+assets:
+  - instrument_id: SOL-USDT-SWAP
+    asset_class: crypto
+    tier: mature_crypto
+    max_weight: 0.08
+    status: shadow
+    model: sol_1m_eth_v3_transfer_v1
+    reason: portfolio_candidate_missed_calendar_2025_return_gate
+  - instrument_id: DOGE-USDT-SWAP
+    asset_class: crypto
+    tier: mature_crypto
+    max_weight: 0.02
+    status: shadow
+    model: doge_1m_eth_v3_transfer_v1
+    reason: capped_for_high_regime_variance
+  - instrument_id: XAU-USDT-SWAP
+    asset_class: commodity
+    tier: commodity
+    max_weight: 0.07
+    status: observe
+    model: null
+    reason: tested_models_negative
+  - instrument_id: CL-USDT-SWAP
+    asset_class: commodity
+    tier: new_listing
+    max_weight: 0.03
+    status: observe
+    model: null
+    reason: insufficient_history
+  - instrument_id: MU-USDT-SWAP
+    asset_class: stock_perpetual
+    tier: new_listing
+    max_weight: 0.02
+    status: observe
+    model: stock_cross_sectional_factor_observation
+    reason: insufficient_history
+  - instrument_id: SNDK-USDT-SWAP
+    asset_class: stock_perpetual
+    tier: new_listing
+    max_weight: 0.02
+    status: observe
+    model: stock_cross_sectional_factor_observation
+    reason: insufficient_history
+  - instrument_id: AAPL-USDT-SWAP
+    asset_class: stock_perpetual
+    tier: new_listing
+    max_weight: 0.015
+    status: observe
+    model: stock_cross_sectional_factor_observation
+    reason: corrected_from_APPLUSDT_and_insufficient_history
+  - instrument_id: GOOGL-USDT-SWAP
+    asset_class: stock_perpetual
+    tier: new_listing
+    max_weight: 0.01
+    status: observe
+    model: stock_cross_sectional_factor_observation
+    reason: insufficient_history
+  - instrument_id: AMD-USDT-SWAP
+    asset_class: stock_perpetual
+    tier: new_listing
+    max_weight: 0.015
+    status: observe
+    model: stock_cross_sectional_factor_observation
+    reason: initial_history_contains_nine_missing_minutes
+  - instrument_id: NVDA-USDT-SWAP
+    asset_class: stock_perpetual
+    tier: new_listing
+    max_weight: 0.01
+    status: observe
+    model: stock_cross_sectional_factor_observation
+    reason: insufficient_history
+  - instrument_id: SPCX-USDT-SWAP
+    asset_class: stock_perpetual
+    tier: new_listing
+    max_weight: 0.01
+    status: observe
+    model: stock_cross_sectional_factor_observation
+    reason: listed_2026_05_07_shortest_history
+
+stock_factor_observation:
+  development_only: true
+  data_start: "2026-05-15"
+  data_end: "2026-07-11"
+  promising_factors:
+    - name: volume_price_divergence_24h
+      mean_ic: 0.0446428571
+      t_stat: 3.7272831536
+    - name: ma_spread_8_24h
+      mean_ic: 0.0285348789
+      t_stat: 2.2510399563
+  rejected_factors:
+    - momentum_24h
+    - mean_reversion_24h

@@ -1,0 +1,52 @@
+experiment:
+  name: xau_sparse_ridge_24h_active_contrarian_v2
+  allow_dirty_git: true
+
+data:
+  start: "2025-04-17"
+  end: "2026-07-11"
+  timeframe: "1h"
+  universe: {mode: explicit, venue: OKX, instruments: [XAU-USDT-SWAP]}
+
+factors:
+  - {name: momentum, alias: momentum_24h, params: {lookback: 24}}
+  - {name: ma_spread, alias: ma_spread_24_168h, params: {fast_period: 24, slow_period: 168}}
+  - {name: historical_volatility, alias: volatility_72h, params: {period: 72, annualize: true}}
+
+combination:
+  method: machine_learning
+  name: xau_sparse_ridge_24h_active_contrarian_signal
+  training_horizon: 24
+  params:
+    model: ridge
+    model_params: {alpha: 100.0}
+    min_train_observations: 4320
+    min_train_periods: 4320
+    train_window_periods: 8760
+    retrain_every: 168
+    embargo_bars: 1
+    label_lag_bars: 1
+    min_present_factors: 3
+
+label: {price: next_open, horizons: [24]}
+preprocess:
+  winsorize: {lower: 0.01, upper: 0.99, scope: time_series}
+  normalize: zscore
+  normalize_scope: time_series
+  rolling_window: 2160
+  rolling_min_periods: 720
+evaluation:
+  scope: time_series
+  quantiles: 5
+  ic_method: spearman
+  min_cross_section: 2
+  stability_period: 3mo
+  stability_min_observations: 720
+  primary_horizon: 24
+portfolio:
+  mode: time_series_threshold
+  long_threshold_bps: 0
+  short_threshold_bps: null
+  signal_multiplier: -1
+  signal_smoothing_periods: 1
+cost: {fee_bps: 5, slippage_bps: 3}
