@@ -2,14 +2,13 @@ portfolio:
   name: multi_asset_observation_v9
   as_of: "2026-07-19"
   production_reference: strategy_low_leverage_diversified_v8
-  candidate_reference: strategy_multi_asset_v9
+  candidate_reference: strategy_multi_asset_v9_no_doge
   fee_bps_per_side: 5
   slippage_bps_per_side: 3
   funding_cost_required_before_activation: true
 
 limits:
-  crypto_candidate_total_weight: 0.10
-  doge_max_weight: 0.02
+  crypto_candidate_total_weight: 0.08
   stock_perpetual_total_weight: 0.10
   stock_perpetual_single_weight: 0.02
   commodity_total_weight: 0.10
@@ -37,13 +36,6 @@ assets:
     status: shadow
     model: sol_1m_eth_v3_transfer_v1
     reason: portfolio_candidate_missed_calendar_2025_return_gate
-  - instrument_id: DOGE-USDT-SWAP
-    asset_class: crypto
-    tier: mature_crypto
-    max_weight: 0.02
-    status: shadow
-    model: doge_1m_eth_v3_transfer_v1
-    reason: capped_for_high_regime_variance
   - instrument_id: XAU-USDT-SWAP
     asset_class: commodity
     tier: commodity

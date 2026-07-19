@@ -1,4 +1,4 @@
-"""Evaluate the ETH/BTC core after adding capped SOL and DOGE sleeves."""
+"""Evaluate the ETH/BTC core after adding a capped SOL sleeve."""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from research_high_return_portfolio import (
     scaled_returns,
 )
 
-SLEEVE_NAMES = ("eth_1m", "btc_72h", "eth_168h", "eth_24h", "sol_1m", "doge_1m")
-WEIGHTS = (0.20, 0.10, 0.20, 0.40, 0.08, 0.02)
+SLEEVE_NAMES = ("eth_1m", "btc_72h", "eth_168h", "eth_24h", "sol_1m")
+WEIGHTS = (0.20, 0.10, 0.20, 0.42, 0.08)
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,7 +28,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eth-168h-artifact", type=Path, required=True)
     parser.add_argument("--eth-24h-artifact", type=Path, required=True)
     parser.add_argument("--sol-minute-artifact", type=Path, required=True)
-    parser.add_argument("--doge-minute-artifact", type=Path, required=True)
     parser.add_argument("--data-root", type=Path, default=Path("data/market/v1"))
     parser.add_argument("--development-end", default="2025-01-01")
     parser.add_argument("--output", type=Path, required=True)
@@ -62,9 +61,6 @@ def load_sleeves(
         ),
         "sol_1m": minute_strategy_wealth(
             args.sol_minute_artifact, cost_multiplier=cost_multiplier
-        ),
-        "doge_1m": minute_strategy_wealth(
-            args.doge_minute_artifact, cost_multiplier=cost_multiplier
         ),
     }
 
@@ -184,7 +180,6 @@ def main() -> None:
         "eth_168h": args.eth_168h_artifact,
         "eth_24h": args.eth_24h_artifact,
         "sol_1m": args.sol_minute_artifact,
-        "doge_1m": args.doge_minute_artifact,
     }
     sleeve_exposure = {
         name: average_absolute_position(path, start=development_end, end=oos_end)
@@ -230,7 +225,7 @@ def main() -> None:
     stress.write_csv(args.output.parent / "selected_cost_stress.csv")
     summary = {
         "selection_rule": (
-            "fixed 20/10/20/40/8/2 weights; minimum development-only leverage "
+            "fixed 20/10/20/42/8 weights; minimum development-only leverage "
             "clearing 100% annual return"
         ),
         "weights": dict(zip(SLEEVE_NAMES, WEIGHTS, strict=True)),
