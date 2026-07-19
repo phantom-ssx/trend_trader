@@ -1,0 +1,72 @@
+experiment:
+  name: factor_screen_ic_weighted_v1
+  allow_dirty_git: true
+
+data:
+  start: "2023-01-01"
+  end: "2026-01-01"
+  timeframe: "1h"
+  universe:
+    mode: start_snapshot
+    venue: OKX
+    instrument_type: SWAP
+    settle_currency: USDT
+    contract_type: linear
+    min_quote_volume_24h: 5000000
+    min_listing_days: 90
+    top_n_by_volume: 50
+
+factors:
+  - name: historical_volatility
+    alias: volatility_24h
+    params:
+      period: 24
+      annualize: true
+  - name: momentum
+    alias: momentum_24h
+    params:
+      lookback: 24
+  - name: mean_reversion
+    alias: mean_reversion_24h
+    params:
+      period: 24
+  - name: turnover
+    alias: turnover_24h
+    params:
+      period: 24
+
+combination:
+  method: ic_weighted
+  name: adaptive_factor_score
+  training_horizon: 4
+  params:
+    window: 720
+    min_periods: 168
+    min_cross_section: 5
+    min_factors: 4
+    ic_method: spearman
+    normalization: sum_abs
+    missing: renormalize
+    half_life: 168
+    clip: 0.25
+    label_lag_bars: 1
+
+label:
+  price: next_open
+  horizons: [1, 4, 8, 24]
+
+preprocess:
+  winsorize:
+    lower: 0.01
+    upper: 0.99
+  normalize: zscore
+
+evaluation:
+  quantiles: 5
+  ic_method: spearman
+  min_cross_section: 5
+  primary_horizon: 4
+
+cost:
+  fee_bps: 5
+  slippage_bps: 3

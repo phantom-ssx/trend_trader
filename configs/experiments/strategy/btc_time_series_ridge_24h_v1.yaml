@@ -1,0 +1,101 @@
+experiment:
+  name: btc_time_series_ridge_24h_v1
+  allow_dirty_git: true
+
+data:
+  start: "2023-01-01"
+  end: "2026-01-01"
+  timeframe: "1h"
+  universe:
+    mode: explicit
+    venue: OKX
+    instruments: [BTC-USDT-SWAP]
+
+factors:
+  - name: momentum
+    alias: momentum_24h
+    params: {lookback: 24}
+  - name: ma_spread
+    alias: ma_spread_8_24
+    params: {fast_period: 8, slow_period: 24}
+  - name: trend_slope
+    alias: trend_slope_24h
+    params: {period: 24, weight_r2: false}
+  - name: breakout
+    alias: breakout_24h
+    params: {period: 24}
+  - name: mean_reversion
+    alias: mean_reversion_24h
+    params: {period: 24}
+  - name: historical_volatility
+    alias: volatility_24h
+    params: {period: 24, annualize: true}
+  - name: atr
+    alias: atr_14h
+    params: {period: 14, normalized: true}
+  - name: volatility_change
+    alias: volatility_change_24_72h
+    params: {short_period: 24, long_period: 72}
+  - name: up_down_volatility_asymmetry
+    alias: volatility_asymmetry_24h
+    params: {period: 24}
+  - name: volume_change
+    alias: volume_change_24h
+    params: {period: 24}
+  - name: turnover
+    alias: turnover_24h
+    params: {period: 24}
+  - name: amihud
+    alias: amihud_24h
+    params: {period: 24, log_transform: false}
+  - name: volume_price_divergence
+    alias: volume_price_divergence_24h
+    params: {period: 24}
+
+combination:
+  method: machine_learning
+  name: btc_ridge_24h_prediction
+  training_horizon: 24
+  params:
+    model: ridge
+    model_params:
+      alpha: 100.0
+    min_train_observations: 2160
+    min_train_periods: 2160
+    train_window_periods: 8760
+    retrain_every: 168
+    embargo_bars: 1
+    label_lag_bars: 1
+    min_present_factors: 13
+
+label:
+  price: next_open
+  horizons: [24]
+
+preprocess:
+  winsorize:
+    lower: 0.01
+    upper: 0.99
+    scope: time_series
+  normalize: zscore
+  normalize_scope: time_series
+  rolling_window: 720
+  rolling_min_periods: 168
+
+evaluation:
+  scope: time_series
+  quantiles: 5
+  ic_method: spearman
+  min_cross_section: 2
+  stability_period: 1mo
+  stability_min_observations: 168
+  primary_horizon: 24
+
+portfolio:
+  mode: time_series_threshold
+  long_threshold_bps: 20
+  short_threshold_bps: 20
+
+cost:
+  fee_bps: 5
+  slippage_bps: 3

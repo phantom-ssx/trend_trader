@@ -1,0 +1,79 @@
+experiment:
+  name: eth_hourly_sparse_ridge_predict_24h_trend_v1
+  allow_dirty_git: true
+
+data:
+  start: "2020-01-11"
+  end: "2026-07-11"
+  timeframe: "1h"
+  universe:
+    mode: explicit
+    venue: OKX
+    instruments: [ETH-USDT-SWAP]
+
+factors:
+  - name: historical_volatility
+    alias: volatility_24h
+    params: {period: 24, annualize: true}
+  - name: atr
+    alias: atr_14h
+    params: {period: 14, normalized: true}
+  - name: volatility_change
+    alias: volatility_change_24_72h
+    params: {short_period: 24, long_period: 72}
+  - name: trend_slope
+    alias: trend_slope_24h
+    params: {period: 24, weight_r2: false}
+
+combination:
+  method: machine_learning
+  name: eth_hourly_sparse_ridge_predict_24h_trend_signal
+  training_horizon: 24
+  params:
+    model: ridge
+    model_params:
+      alpha: 100.0
+    min_train_observations: 4320
+    min_train_periods: 4320
+    train_window_periods: 17520
+    retrain_every: 168
+    embargo_bars: 1
+    label_lag_bars: 1
+    min_present_factors: 4
+
+label:
+  price: next_open
+  horizons: [1, 24]
+
+preprocess:
+  winsorize:
+    lower: 0.01
+    upper: 0.99
+    scope: time_series
+  normalize: zscore
+  normalize_scope: time_series
+  rolling_window: 2160
+  rolling_min_periods: 720
+
+evaluation:
+  scope: time_series
+  quantiles: 5
+  ic_method: spearman
+  min_cross_section: 2
+  stability_period: 3mo
+  stability_min_observations: 720
+  primary_horizon: 1
+
+portfolio:
+  mode: time_series_threshold
+  long_threshold_bps: 20
+  short_threshold_bps: null
+  signal_multiplier: 1
+  signal_smoothing_periods: 48
+  long_trend_filter_bars: 720
+  long_trend_min_return_bps: 0
+  position_size: 0.5
+
+cost:
+  fee_bps: 5
+  slippage_bps: 3

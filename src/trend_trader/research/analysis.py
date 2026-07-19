@@ -152,7 +152,7 @@ class FactorAnalyzer:
             pl.len().over(rank_keys).alias("_count"),
         ).filter(pl.col("_count") >= quantiles)
         ranked = ranked.with_columns(
-            (((pl.col("_rank") - 1) * (quantiles - 1) / (pl.col("_count") - 1)).floor() + 1)
+            (((pl.col("_rank") - 1) * quantiles / pl.col("_count")).floor() + 1)
             .clip(1, quantiles)
             .cast(pl.Int16)
             .alias("quantile")
@@ -290,11 +290,17 @@ class FactorAnalyzer:
             .sort(*keys)
         )
 
-    def decay(self, *, method: CorrelationMethod = "spearman") -> pl.DataFrame:
+    def decay(
+        self,
+        *,
+        method: CorrelationMethod = "spearman",
+        quantiles: int = 5,
+        scope: QuantileScope = "cross_sectional",
+    ) -> pl.DataFrame:
         """Prediction-strength decay across label horizons."""
 
         ic = self.overall_ic(method=method, min_observations=2)
-        spreads = self.quantile_spread()
+        spreads = self.quantile_spread(quantiles=quantiles, scope=scope)
         return ic.join(
             spreads.select(
                 "factor_name",
@@ -446,12 +452,24 @@ class FactorAnalyzer:
     ) -> FactorAnalysisReport:
         """Run the standard factor-analysis suite."""
 
-        series = self.ic_series(method=method, min_observations=min_cross_section)
+        periodic = self.periodic_ic(
+            every=stability_period,
+            method=method,
+            min_observations=stability_min_observations,
+        )
+        series = (
+            periodic.rename({"period": "timestamp"})
+            if quantile_scope == "time_series"
+            else self.ic_series(method=method, min_observations=min_cross_section)
+        )
         factor_returns = self.factor_returns(min_observations=min_cross_section)
         quantile_returns = self.quantile_returns(quantiles=quantiles, scope=quantile_scope)
         return FactorAnalysisReport(
             summary=self.summary(),
-            overall_ic=self.overall_ic(method=method),
+            overall_ic=self.overall_ic(
+                method=method,
+                min_observations=min_cross_section,
+            ),
             ic_series=series,
             ic_summary=self.ic_summary(series),
             factor_returns=factor_returns,
@@ -462,12 +480,8 @@ class FactorAnalyzer:
                 quantiles=quantiles,
                 scope=quantile_scope,
             ),
-            periodic_ic=self.periodic_ic(
-                every=stability_period,
-                method=method,
-                min_observations=stability_min_observations,
-            ),
-            decay=self.decay(method=method),
+            periodic_ic=periodic,
+            decay=self.decay(method=method, quantiles=quantiles, scope=quantile_scope),
             factor_correlation=self.factor_correlation(method=method),
             autocorrelation=self.autocorrelation(),
         )

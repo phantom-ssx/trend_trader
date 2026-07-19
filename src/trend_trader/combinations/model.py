@@ -78,10 +78,14 @@ class WalkForwardModelCombiner(FactorCombiner):
         fit_count = 0
         last_training_size = 0
         timestamps = features["timestamp"].unique(maintain_order=True).sort().to_list()
+        features_by_timestamp = {
+            frame["timestamp"][0]: frame
+            for frame in features.partition_by("timestamp", maintain_order=True)
+        }
         for index, timestamp in enumerate(timestamps):
-            current = features.filter(pl.col("timestamp") == timestamp)
+            current = features_by_timestamp[timestamp]
             should_refit = last_fit_index is None or index - last_fit_index >= retrain_every
-            if should_refit:
+            if should_refit and index >= min_periods:
                 eligible = training.filter(
                     pl.col("label_is_valid")
                     & pl.col("label_value").is_not_null()
@@ -123,9 +127,15 @@ class WalkForwardModelCombiner(FactorCombiner):
                     }
                 )
 
-        scores = pl.DataFrame(score_rows, infer_schema_length=None)
+        scores = pl.DataFrame(score_rows, infer_schema_length=None).with_columns(
+            pl.col(key).cast(features.schema[key]).alias(key) for key in KEYS
+        )
         weights = (
-            pl.DataFrame(weight_rows, infer_schema_length=None) if weight_rows else pl.DataFrame()
+            pl.DataFrame(weight_rows, infer_schema_length=None).with_columns(
+                pl.col("timestamp").cast(features.schema["timestamp"])
+            )
+            if weight_rows
+            else pl.DataFrame()
         )
         diagnostics = {
             "method": self.method,

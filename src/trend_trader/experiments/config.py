@@ -196,6 +196,7 @@ class ExperimentPreprocessConfig(StrictModel):
 
 
 class ExperimentEvaluationConfig(StrictModel):
+    scope: Literal["cross_sectional", "time_series"] = "cross_sectional"
     quantiles: int = 5
     ic_method: Literal["pearson", "spearman"] = "spearman"
     min_cross_section: int = 5

@@ -1,0 +1,39 @@
+experiment:
+  name: ma_spread_8_24_v1
+  allow_dirty_git: true
+
+data:
+  start: "2023-01-01"
+  end: "2026-01-01"
+  timeframe: "1h"
+  universe:
+    mode: start_snapshot
+    venue: OKX
+    instrument_type: SWAP
+    settle_currency: USDT
+    contract_type: linear
+    min_quote_volume_24h: 5000000
+    min_listing_days: 90
+    top_n_by_volume: 50
+
+factor:
+  name: ma_spread
+  params:
+    fast_period: 8
+    slow_period: 24
+
+label:
+  price: next_open
+  horizons: [1, 4, 8, 24]
+
+preprocess:
+  winsorize:
+    lower: 0.01
+    upper: 0.99
+  normalize: zscore
+
+evaluation:
+  quantiles: 5
+  ic_method: spearman
+  min_cross_section: 5
+  primary_horizon: 4

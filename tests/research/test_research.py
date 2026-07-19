@@ -196,6 +196,9 @@ def test_analyzer_computes_ic_quantiles_and_factor_correlation() -> None:
     assert positive.filter(pl.col("quantile") == 1)["mean_return"].item() == 1.0
     assert positive.filter(pl.col("quantile") == 5)["mean_return"].item() == 5.0
 
+    halves = analyzer.quantile_returns(quantiles=2).filter(pl.col("factor_name") == "positive")
+    assert halves["observations"].to_list() == [9, 6]
+
     spread = analyzer.quantile_spread(quantiles, quantiles=5)
     positive_spread = spread.filter(pl.col("factor_name") == "positive")
     assert positive_spread["long_short_return"].item() == 4.0
@@ -206,6 +209,25 @@ def test_analyzer_computes_ic_quantiles_and_factor_correlation() -> None:
         (pl.col("factor_left") == "negative") & (pl.col("factor_right") == "positive")
     )
     assert pair["correlation"].item() == pytest.approx(-1.0)
+
+
+def test_analyzer_uses_periodic_time_series_ic_for_single_instrument() -> None:
+    frame = analysis_dataset().frame.filter(
+        (pl.col("factor_name") == "positive") & (pl.col("instrument_id") == "ASSET-0")
+    )
+
+    report = FactorAnalyzer(ResearchDataset(frame)).run(
+        min_cross_section=2,
+        quantiles=2,
+        quantile_scope="time_series",
+        stability_period="1d",
+        stability_min_observations=2,
+    )
+
+    assert report.overall_ic["ic"][0] == pytest.approx(1.0)
+    assert report.ic_series.height == 1
+    assert report.ic_summary["mean_ic"][0] == pytest.approx(1.0)
+    assert set(report.quantile_returns["scope"].to_list()) == {"time_series"}
 
 
 def test_standard_analysis_report_contains_stability_and_decay() -> None:

@@ -113,9 +113,14 @@ class IcWeightedCombiner(FactorCombiner):
             score_rows.extend(
                 _weighted_scores(cross_section, request.factor_names, weights, missing)
             )
-        scores = pl.DataFrame(score_rows, infer_schema_length=None)
+        scores = pl.DataFrame(score_rows, infer_schema_length=None).with_columns(
+            pl.col(key).cast(features.schema[key]).alias(key) for key in KEYS
+        )
         weights_frame = (
-            pl.DataFrame(weight_rows, infer_schema_length=None)
+            pl.DataFrame(weight_rows, infer_schema_length=None).with_columns(
+                pl.col("timestamp").cast(features.schema["timestamp"]),
+                pl.col("latest_label_exit_time").cast(features.schema["timestamp"]),
+            )
             if weight_rows
             else pl.DataFrame(
                 schema={

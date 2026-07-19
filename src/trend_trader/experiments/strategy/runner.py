@@ -25,6 +25,7 @@ from trend_trader.experiments.strategy.config import StrategyExperimentConfig
 from trend_trader.experiments.strategy.portfolio import (
     build_portfolio_returns,
     portfolio_metrics,
+    portfolio_yearly_metrics,
 )
 from trend_trader.experiments.strategy.report import render_strategy_report
 from trend_trader.experiments.versioning import combination_code_version
@@ -80,6 +81,7 @@ class StrategyExperimentRunner:
                 method=config.evaluation.ic_method,
                 min_cross_section=config.evaluation.min_cross_section,
                 quantiles=config.evaluation.quantiles,
+                quantile_scope=config.evaluation.scope,
                 stability_period=config.evaluation.stability_period,
                 stability_min_observations=config.evaluation.stability_min_observations,
             )
@@ -90,13 +92,26 @@ class StrategyExperimentRunner:
                 start=config.data.start,
                 quantiles=config.evaluation.quantiles,
                 round_trip_cost_bps=config.cost.round_trip_bps,
+                mode=config.portfolio.mode,
+                long_threshold_bps=config.portfolio.long_threshold_bps,
+                short_threshold_bps=config.portfolio.short_threshold_bps,
+                signal_multiplier=config.portfolio.signal_multiplier,
+                signal_smoothing_periods=config.portfolio.signal_smoothing_periods,
+                long_trend_filter_bars=config.portfolio.long_trend_filter_bars,
+                long_trend_min_return_bps=config.portfolio.long_trend_min_return_bps,
+                position_size=config.portfolio.position_size,
             )
             metrics = portfolio_metrics(returns, timeframe=config.data.timeframe)
+            yearly_metrics = portfolio_yearly_metrics(
+                returns,
+                timeframe=config.data.timeframe,
+            )
             data_version, data_manifest = fingerprint_experiment_data(self.data, config, prepared)
             primary = _strategy_primary_metrics(
                 analysis.ic_summary,
                 metrics,
                 horizon=config.primary_horizon,
+                signal_multiplier=config.portfolio.signal_multiplier,
             )
             component_versions = ",".join(item["version"] for item in prepared.factor_versions)
             strategy_version = f"{combination_version['version']}|{component_versions}"
@@ -154,9 +169,11 @@ class StrategyExperimentRunner:
                     "transaction_costs_applied_to_training_target": False,
                 },
                 "cost": cost_model,
+                "portfolio": config.portfolio.model_dump(mode="json"),
                 "primary_horizon": config.primary_horizon,
                 "primary_metrics": primary,
                 "metrics_by_horizon": metrics.to_dicts(),
+                "yearly_metrics": yearly_metrics.to_dicts(),
                 "interpretation": {
                     "focus": "net portfolio return, drawdown, risk-adjusted return, and turnover",
                     "signal_ic_role": (
@@ -179,6 +196,7 @@ class StrategyExperimentRunner:
             artifacts.write_csv("combination_weights.csv", combination.weights)
             artifacts.write_csv("portfolio_returns.csv", returns)
             artifacts.write_csv("portfolio_metrics.csv", metrics)
+            artifacts.write_csv("yearly_portfolio_metrics.csv", yearly_metrics)
             if combination.model_bytes is not None:
                 artifacts.write_bytes("model.pkl", combination.model_bytes)
             artifacts.write_text(
@@ -189,6 +207,7 @@ class StrategyExperimentRunner:
                     quantile_returns=analysis.quantile_returns,
                     portfolio_returns=returns,
                     portfolio_metrics=metrics,
+                    yearly_metrics=yearly_metrics,
                     combination_weights=combination.weights,
                 ),
             )
@@ -208,8 +227,8 @@ class StrategyExperimentRunner:
             )
             record.update(
                 {
-                    "mean_ic": primary["signal_mean_ic"],
-                    "ic_ir": primary["signal_ic_ir"],
+                    "mean_ic": primary["effective_signal_mean_ic"],
+                    "ic_ir": primary["effective_signal_ic_ir"],
                     "long_short_return": primary["long_short_return"],
                     "annual_return": primary["annual_return"],
                     "sharpe": primary["sharpe"],
@@ -229,16 +248,35 @@ def _strategy_primary_metrics(
     metrics: pl.DataFrame,
     *,
     horizon: int,
+    signal_multiplier: float = 1.0,
 ) -> dict[str, float | None]:
     ic = ic_summary.filter(pl.col("horizon_bars") == horizon)
     performance = metrics.filter(pl.col("horizon_bars") == horizon)
+    raw_mean_ic = first_float(ic, "mean_ic")
+    raw_ic_ir = first_float(ic, "icir")
     return {
-        "signal_mean_ic": first_float(ic, "mean_ic"),
-        "signal_ic_ir": first_float(ic, "icir"),
+        "signal_mean_ic": raw_mean_ic,
+        "signal_ic_ir": raw_ic_ir,
+        "effective_signal_mean_ic": (
+            raw_mean_ic * signal_multiplier if raw_mean_ic is not None else None
+        ),
+        "effective_signal_ic_ir": (
+            raw_ic_ir * signal_multiplier if raw_ic_ir is not None else None
+        ),
+        "portfolio_return": first_float(performance, "total_return"),
         "long_short_return": first_float(performance, "total_return"),
         "annual_return": first_float(performance, "annual_return"),
         "sharpe": first_float(performance, "sharpe"),
         "max_drawdown": first_float(performance, "max_drawdown"),
+        "active_return": first_float(performance, "active_total_return"),
+        "active_annual_return": first_float(performance, "active_annual_return"),
+        "active_sharpe": first_float(performance, "active_sharpe"),
+        "active_max_drawdown": first_float(performance, "active_max_drawdown"),
+        "benchmark_return": first_float(performance, "benchmark_total_return"),
+        "benchmark_annual_return": first_float(performance, "benchmark_annual_return"),
+        "benchmark_sharpe": first_float(performance, "benchmark_sharpe"),
+        "benchmark_max_drawdown": first_float(performance, "benchmark_max_drawdown"),
+        "relative_total_return": first_float(performance, "relative_total_return"),
         "turnover": first_float(performance, "turnover"),
     }
 

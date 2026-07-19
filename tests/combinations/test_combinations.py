@@ -108,8 +108,34 @@ def test_ic_weights_only_use_matured_labels() -> None:
     )
 
 
+def test_ic_weights_preserve_millisecond_timestamp_keys() -> None:
+    dataset = _dataset(periods=8)
+    timestamp_type = pl.Datetime(time_unit="ms", time_zone="UTC")
+    dataset.frame = dataset.frame.with_columns(pl.col("timestamp").cast(timestamp_type))
+
+    result = FactorCombinationClient().combine(
+        dataset,
+        FactorCombinationRequest(
+            method="ic_weighted",
+            factor_names=("quality", "reversal"),
+            name="rolling_ic",
+            training_horizon=1,
+            params={
+                "window": 3,
+                "min_periods": 2,
+                "min_cross_section": 5,
+            },
+        ),
+    )
+
+    assert result.dataset.frame.schema["timestamp"] == timestamp_type
+    assert result.weights.schema["timestamp"] == timestamp_type
+
+
 def test_machine_learning_and_deep_learning_are_walk_forward() -> None:
-    dataset = _dataset(periods=9)
+    timestamp_type = pl.Datetime("ms", "UTC")
+    original = _dataset(periods=9)
+    dataset = ResearchDataset(original.frame.with_columns(pl.col("timestamp").cast(timestamp_type)))
     client = FactorCombinationClient()
     machine = client.combine(
         dataset,
@@ -152,6 +178,8 @@ def test_machine_learning_and_deep_learning_are_walk_forward() -> None:
     assert neural.dataset.valid()["timestamp"].min() == expected_start
     assert machine.model_bytes is not None
     assert neural.model_bytes is not None
+    assert machine.dataset.frame.schema["timestamp"] == timestamp_type
+    assert machine.weights.schema["timestamp"] == timestamp_type
     assert machine.diagnostics["fit_count"] >= 1
     assert neural.diagnostics["model"] == "mlp"
     assert "deep_learning" in default_combination_registry.methods()

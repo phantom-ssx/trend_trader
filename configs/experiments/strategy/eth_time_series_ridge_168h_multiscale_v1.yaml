@@ -1,0 +1,110 @@
+experiment:
+  name: eth_time_series_ridge_168h_multiscale_v1
+  allow_dirty_git: true
+
+data:
+  start: "2023-01-01"
+  end: "2026-01-01"
+  timeframe: "1h"
+  universe:
+    mode: explicit
+    venue: OKX
+    instruments: [ETH-USDT-SWAP]
+
+factors:
+  - name: momentum
+    alias: momentum_24h
+    params: {lookback: 24}
+  - name: momentum
+    alias: momentum_72h
+    params: {lookback: 72}
+  - name: momentum
+    alias: momentum_168h
+    params: {lookback: 168}
+  - name: ma_spread
+    alias: ma_spread_24_72h
+    params: {fast_period: 24, slow_period: 72}
+  - name: ma_spread
+    alias: ma_spread_24_168h
+    params: {fast_period: 24, slow_period: 168}
+  - name: trend_slope
+    alias: trend_slope_72h
+    params: {period: 72, weight_r2: false}
+  - name: trend_slope
+    alias: trend_slope_168h
+    params: {period: 168, weight_r2: false}
+  - name: breakout
+    alias: breakout_72h
+    params: {period: 72}
+  - name: breakout
+    alias: breakout_168h
+    params: {period: 168}
+  - name: historical_volatility
+    alias: volatility_72h
+    params: {period: 72, annualize: true}
+  - name: atr
+    alias: atr_72h
+    params: {period: 72, normalized: true}
+  - name: up_down_volatility_asymmetry
+    alias: volatility_asymmetry_72h
+    params: {period: 72}
+  - name: volume_change
+    alias: volume_change_72h
+    params: {period: 72}
+  - name: turnover
+    alias: turnover_72h
+    params: {period: 72}
+  - name: amihud
+    alias: amihud_72h
+    params: {period: 72, log_transform: false}
+  - name: volume_price_divergence
+    alias: volume_price_divergence_72h
+    params: {period: 72}
+
+combination:
+  method: machine_learning
+  name: eth_ridge_168h_multiscale_prediction
+  training_horizon: 168
+  params:
+    model: ridge
+    model_params:
+      alpha: 100.0
+    min_train_observations: 4320
+    min_train_periods: 4320
+    train_window_periods: 8760
+    retrain_every: 336
+    embargo_bars: 1
+    label_lag_bars: 1
+    min_present_factors: 16
+
+label:
+  price: next_open
+  horizons: [168]
+
+preprocess:
+  winsorize:
+    lower: 0.01
+    upper: 0.99
+    scope: time_series
+  normalize: zscore
+  normalize_scope: time_series
+  rolling_window: 2160
+  rolling_min_periods: 720
+
+evaluation:
+  scope: time_series
+  quantiles: 5
+  ic_method: spearman
+  min_cross_section: 2
+  stability_period: 3mo
+  stability_min_observations: 720
+  primary_horizon: 168
+
+portfolio:
+  mode: time_series_threshold
+  long_threshold_bps: 100
+  short_threshold_bps: 100
+
+cost:
+  fee_bps: 5
+  slippage_bps: 3

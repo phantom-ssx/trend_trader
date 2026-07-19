@@ -18,18 +18,49 @@ def render_strategy_report(
     quantile_returns: pl.DataFrame,
     portfolio_returns: pl.DataFrame,
     portfolio_metrics: pl.DataFrame,
+    yearly_metrics: pl.DataFrame,
     combination_weights: pl.DataFrame | None = None,
 ) -> str:
     primary = summary.get("primary_metrics", {})
+    portfolio = summary.get("portfolio", {})
+    portfolio_mode = (
+        str(portfolio.get("mode", "long_short")) if isinstance(portfolio, Mapping) else "long_short"
+    )
+    return_label = "Long-short return" if portfolio_mode == "long_short" else "Portfolio return"
     cards = [
-        ("Signal mean IC", _number(primary.get("signal_mean_ic"))),
-        ("Signal ICIR", _number(primary.get("signal_ic_ir"))),
-        ("Long-short return", _percent(primary.get("long_short_return"))),
+        ("Raw signal mean IC", _number(primary.get("signal_mean_ic"))),
+        ("Raw signal ICIR", _number(primary.get("signal_ic_ir"))),
+        (return_label, _percent(primary.get("portfolio_return"))),
         ("Annual return", _percent(primary.get("annual_return"))),
         ("Sharpe", _number(primary.get("sharpe"))),
         ("Max drawdown", _percent(primary.get("max_drawdown"))),
         ("Turnover", _percent(primary.get("turnover"))),
     ]
+    signal_multiplier = (
+        float(portfolio.get("signal_multiplier", 1.0)) if isinstance(portfolio, Mapping) else 1.0
+    )
+    if signal_multiplier == -1:
+        cards.extend(
+            [
+                ("Effective signal IC", _number(primary.get("effective_signal_mean_ic"))),
+                ("Effective signal ICIR", _number(primary.get("effective_signal_ic_ir"))),
+            ]
+        )
+    if portfolio_mode != "long_short":
+        cards.extend(
+            [
+                ("Active return", _percent(primary.get("active_return"))),
+                ("Active Sharpe", _number(primary.get("active_sharpe"))),
+            ]
+        )
+    if portfolio_mode == "time_series_threshold":
+        cards.extend(
+            [
+                ("Benchmark return", _percent(primary.get("benchmark_return"))),
+                ("Benchmark Sharpe", _number(primary.get("benchmark_sharpe"))),
+                ("Relative wealth", _percent(primary.get("relative_total_return"))),
+            ]
+        )
     cards_html = "".join(
         f'<div class="card"><span>{html.escape(label)}</span><strong>{value}</strong></div>'
         for label, value in cards
@@ -75,6 +106,7 @@ svg {{ width:100%; height:auto; }}
 <h2>IC summary</h2><div class="scroll">{_table(ic_summary)}</div>
 <h2>Quantile returns</h2><div class="scroll">{_table(quantile_returns)}</div>
 <h2>Portfolio metrics</h2><div class="scroll">{_table(portfolio_metrics)}</div>
+<h2>Yearly metrics</h2><div class="scroll">{_table(yearly_metrics)}</div>
 {weights_section}
 <h2>Reproducibility manifest</h2><div class="panel"><pre>{manifest}</pre></div>
 </main></body></html>"""
