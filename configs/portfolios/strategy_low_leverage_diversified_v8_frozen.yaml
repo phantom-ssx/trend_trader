@@ -1,0 +1,31 @@
+portfolio:
+  name: strategy_low_leverage_diversified_v8_frozen
+  status: shadow_only
+  frozen_at: "2026-07-19T00:00:00Z"
+  data_through: "2026-07-11T00:00:00Z"
+  forward_start: "2026-07-12T00:00:00Z"
+  forbid_parameter_changes_during_forward_test: true
+  target_leverage: 2.25
+  fee_bps_per_side: 5
+  slippage_bps_per_side: 3
+
+weights:
+  eth_1m_monthly_ensemble: 0.20
+  btc_72h_ridge: 0.10
+  eth_168h_contrarian_ridge: 0.20
+  eth_24h_contrarian_long_only: 0.50
+
+artifacts:
+  eth_1m_monthly_ensemble: strategy_eth_1m_monthly_ensemble_v6_20260719_043842
+  btc_72h_ridge: strategy_btc_time_series_ridge_72h_2026_v1_20260719_081410
+  eth_168h_contrarian_ridge: strategy_eth_time_series_ridge_168h_contrarian_2026_v1_20260718_194405
+  eth_24h_contrarian_long_only: strategy_eth_sparse_ridge_24h_contrarian_long_only_2020_2026_v1_20260719_010754
+
+promotion_rules:
+  minimum_independent_168h_periods: 52
+  require_complete_funding_history: true
+  require_phase_audit_pass: true
+  maximum_forward_drawdown: 0.25
+  minimum_forward_sharpe: 1.0
+  minimum_positive_month_rate: 0.55
+  annual_return_is_not_a_selection_criterion: true

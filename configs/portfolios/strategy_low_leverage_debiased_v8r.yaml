@@ -1,0 +1,30 @@
+portfolio:
+  name: strategy_low_leverage_debiased_v8r
+  status: forward_shadow_only
+  created_at: "2026-07-19T00:00:00Z"
+  historical_results_are_contaminated: true
+  forward_start: "2026-07-12T00:00:00Z"
+  forbid_parameter_changes_during_forward_test: true
+  target_leverage: 2.25
+  fee_bps_per_side: 5
+  slippage_bps_per_side: 3
+
+weights:
+  eth_1m_monthly_ensemble: 0.40
+  btc_72h_ridge: 0.00
+  eth_168h_contrarian_ridge: 0.15
+  eth_24h_contrarian_long_only: 0.45
+
+risk_rationale:
+  btc_72h_ridge: removed_after_zero_of_three_positive_daily_rebalance_phases
+  eth_168h_contrarian_ridge: capped_for_phase_sensitivity_and_standalone_drawdown
+  eth_24h_contrarian_long_only: capped_for_profit_concentration
+  eth_1m_monthly_ensemble: remainder_assigned_for_lower_drawdown_and_low_correlation
+
+promotion_rules:
+  minimum_independent_168h_periods: 52
+  require_complete_funding_history: true
+  maximum_forward_drawdown: 0.20
+  minimum_forward_sharpe: 1.0
+  minimum_positive_month_rate: 0.55
+  annual_return_is_not_a_selection_criterion: true

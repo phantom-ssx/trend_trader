@@ -155,7 +155,15 @@ def main() -> None:
             )
     frame = pl.DataFrame(results)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    frame.write_csv(args.output)
+    # Keep the grid-search artifact blind to OOS so it cannot be sorted after the
+    # fact to choose weights. OOS metrics remain available only for the three
+    # predeclared selection rules recorded in summary.json.
+    frame.drop(
+        "oos_annual_return",
+        "oos_sharpe",
+        "oos_max_drawdown",
+        "oos_total_return",
+    ).write_csv(args.output)
 
     weight_columns = [f"{name}_weight" for name in SLEEVE_NAMES]
     best_sharpe_weight_row = (
@@ -193,8 +201,8 @@ def main() -> None:
     stable_selected = (
         stable_candidates.row(0, named=True) if not stable_candidates.is_empty() else None
     )
-    # This allocation is fixed before inspecting OOS results.  Half the risk budget
-    # goes to the only sleeve with positive returns in every complete 2020-2025
+    # This allocation is fixed before inspecting OOS results. Half the risk budget
+    # goes to the only sleeve with positive returns in every complete 2020-2024
     # calendar year; the shorter-history directional sleeves are capped at 20%.
     robust_weights = (0.20, 0.10, 0.20, 0.50)
     robust_candidates = frame.filter(
@@ -208,11 +216,6 @@ def main() -> None:
     robust_selected = (
         robust_candidates.row(0, named=True) if not robust_candidates.is_empty() else None
     )
-    feasible = frame.filter(
-        (pl.col("oos_annual_return") >= 1.0)
-        & (pl.col("oos_max_drawdown") >= -0.40)
-        & (pl.col("dev_max_drawdown") >= -args.max_development_drawdown)
-    ).sort(["dev_sharpe", "dev_annual_return"], descending=True)
     summary = {
         "selection_rule": (
             "maximize development Sharpe on a 5% four-sleeve grid, then use the "
@@ -225,20 +228,17 @@ def main() -> None:
         ),
         "stable_selected": stable_selected,
         "robust_selection_rule": (
-            "allocate 50% to the positive-in-every-complete-2020-2025-year ETH 24h "
+            "allocate 50% to the positive-in-every-complete-2020-2024-year ETH 24h "
             "sleeve, cap shorter-history sleeves at 20%, then choose the minimum "
             "development-only leverage clearing 100% annual return"
         ),
         "robust_selected": robust_selected,
-        "feasible_count": feasible.height,
         "period": {"start": str(common_dates[0]), "end": str(common_dates[-1])},
     }
     (args.output.parent / "summary.json").write_text(
         json.dumps(summary, indent=2) + "\n", encoding="utf-8"
     )
     print(json.dumps(summary, indent=2))
-    print("top candidates clearing OOS 100% / -40% drawdown")
-    print(feasible.head(30))
 
     if robust_selected is None:
         raise ValueError("robust allocation does not clear the development return gate")
