@@ -6,7 +6,7 @@ experiment:
   allow_dirty_git: false
 
 data:
-  start: "2020-01-03"
+  start: "2020-02-02"
   end: "2026-07-11"
   timeframe: "1m"
   universe:
