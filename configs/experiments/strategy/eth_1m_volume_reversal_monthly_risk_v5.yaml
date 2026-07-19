@@ -1,0 +1,65 @@
+experiment:
+  name: eth_1m_volume_reversal_monthly_risk_v5
+  description: >-
+    Monthly-consistency candidate with a 10% realized monthly loss budget: buy
+    the first high-volume 5-minute downside shock and hold for 90 minutes.
+  allow_dirty_git: false
+
+data:
+  start: "2020-02-02"
+  end: "2026-07-11"
+  timeframe: "1m"
+  universe:
+    mode: explicit
+    venue: OKX
+    instruments: [ETH-USDT-SWAP]
+
+factors:
+  - name: volume_confirmed_reversal_event
+    alias: reversal_event
+    params:
+      momentum_lookback: 5
+      normalization_window: 43200
+      normalization_min_periods: 14400
+      smoothing_period: 45
+      signal_threshold: 1.5
+      volume_period: 60
+      minimum_relative_volume: 1.5
+
+combination:
+  method: linear
+  name: eth_1m_volume_reversal_event
+  training_horizon: 90
+  params:
+    weights:
+      reversal_event: 1.0
+    normalize_weights: true
+    missing: drop
+
+label:
+  price: next_open
+  horizons: [1, 90]
+
+preprocess:
+  normalize: none
+
+evaluation:
+  scope: time_series
+  quantiles: 5
+  ic_method: spearman
+  min_cross_section: 2
+  stability_period: 1mo
+  stability_min_observations: 14400
+  primary_horizon: 1
+
+portfolio:
+  mode: time_series_threshold
+  long_threshold_value: 1.5
+  short_threshold_value: null
+  fixed_holding_periods: 90
+  monthly_loss_limit: 0.10
+  position_size: 1.0
+
+cost:
+  fee_bps: 5
+  slippage_bps: 3

@@ -36,6 +36,7 @@ def build_portfolio_returns(
     long_trend_min_return_bps: float = 0.0,
     position_size: float = 1.0,
     fixed_holding_periods: int | None = None,
+    monthly_loss_limit: float | None = None,
 ) -> pl.DataFrame:
     """Build equal-weight, non-overlapping portfolios from signal tails.
 
@@ -81,6 +82,8 @@ def build_portfolio_returns(
         raise ValueError("position_size must be in (0, 1]")
     if fixed_holding_periods is not None and fixed_holding_periods < 1:
         raise ValueError("fixed_holding_periods must be at least 1")
+    if monthly_loss_limit is not None and not 0 < monthly_loss_limit < 1:
+        raise ValueError("monthly_loss_limit must be in (0, 1)")
     step = timedelta(minutes=bar_minutes(timeframe))
     selected_columns = [
         "label_name",
@@ -136,6 +139,7 @@ def build_portfolio_returns(
             long_trend_min_return_bps=long_trend_min_return_bps,
             position_size=position_size,
             fixed_holding_periods=fixed_holding_periods,
+            monthly_loss_limit=monthly_loss_limit,
             timestamp_dtype=dataset.frame.schema["timestamp"],
         )
     rows: list[dict[str, object]] = []
@@ -253,6 +257,7 @@ def _build_time_series_threshold_returns(
     long_trend_min_return_bps: float,
     position_size: float,
     fixed_holding_periods: int | None,
+    monthly_loss_limit: float | None,
     timestamp_dtype: pl.DataType,
 ) -> pl.DataFrame:
     if selected.is_empty():
@@ -291,12 +296,18 @@ def _build_time_series_threshold_returns(
             )
         previous_position = 0.0
         remaining_holding_periods = 0
+        current_month: tuple[int, int] | None = None
+        monthly_wealth = 1.0
         recent_signals: deque[float] = deque(maxlen=signal_smoothing_periods)
         standardization_values: deque[float] = deque()
         standardization_sum = 0.0
         standardization_sum_squares = 0.0
         for observation in label_frame.partition_by("timestamp", maintain_order=True):
             timestamp = observation["timestamp"][0]
+            observation_month = (timestamp.year, timestamp.month)
+            if observation_month != current_month:
+                current_month = observation_month
+                monthly_wealth = 1.0
             bar_index = int((timestamp - start) / step)
             if bar_index < 0 or bar_index % horizon:
                 continue
@@ -339,6 +350,9 @@ def _build_time_series_threshold_returns(
                 and float(trend_return) > long_trend_min_return_bps / 10_000
             )
             can_trade = bool(observation["label_is_valid"][0])
+            monthly_risk_allows_entry = monthly_loss_limit is None or (
+                monthly_wealth - 1 > -monthly_loss_limit
+            )
             if not can_trade:
                 position = previous_position
             elif fixed_holding_periods is not None and previous_position != 0:
@@ -347,11 +361,21 @@ def _build_time_series_threshold_returns(
                     remaining_holding_periods -= 1
                 else:
                     position = 0.0
-            elif signal is not None and signal > long_threshold and long_trend_allows_entry:
+            elif (
+                signal is not None
+                and signal > long_threshold
+                and long_trend_allows_entry
+                and monthly_risk_allows_entry
+            ):
                 position = position_size
                 if fixed_holding_periods is not None:
                     remaining_holding_periods = fixed_holding_periods - 1
-            elif signal is not None and short_threshold is not None and signal < -short_threshold:
+            elif (
+                signal is not None
+                and short_threshold is not None
+                and signal < -short_threshold
+                and monthly_risk_allows_entry
+            ):
                 position = -position_size
                 if fixed_holding_periods is not None:
                     remaining_holding_periods = fixed_holding_periods - 1
@@ -363,6 +387,7 @@ def _build_time_series_threshold_returns(
             gross_return = position * asset_return
             transaction_cost = cost_rate * turnover
             portfolio_return = gross_return - transaction_cost
+            monthly_wealth *= 1 + portfolio_return
             gross_active_return = gross_return - asset_return
             portfolio_active_return = gross_active_return - transaction_cost
             rows.append(

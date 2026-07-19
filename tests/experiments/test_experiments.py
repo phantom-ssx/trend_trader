@@ -436,6 +436,41 @@ def test_time_series_threshold_can_hold_an_event_for_fixed_period() -> None:
     )
 
 
+def test_time_series_threshold_stops_new_entries_after_monthly_loss_limit() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    signals = [2.0, 0.0, 2.0, 0.0, 2.0]
+    returns = [-0.11, 0.0, 0.02, 0.0, 0.02]
+    rows = [
+        {
+            "factor_name": "event",
+            "label_name": "future_return_1bars",
+            "horizon_bars": 1,
+            "timestamp": start + timedelta(hours=index),
+            "exit_time": start + timedelta(hours=index + 1),
+            "instrument_id": "ETH-USDT-SWAP",
+            "value": signal,
+            "gross_return": future_return,
+            "is_valid": True,
+        }
+        for index, (signal, future_return) in enumerate(zip(signals, returns, strict=True))
+    ]
+
+    result = build_portfolio_returns(
+        ResearchDataset(pl.DataFrame(rows, infer_schema_length=None)),
+        factor_name="event",
+        timeframe="1h",
+        start=start,
+        quantiles=5,
+        round_trip_cost_bps=0,
+        mode="time_series_threshold",
+        long_threshold_value=1.5,
+        fixed_holding_periods=1,
+        monthly_loss_limit=0.10,
+    )
+
+    assert result["position"].to_list() == [1.0, 0.0, 0.0, 0.0, 0.0]
+
+
 def test_time_series_threshold_uses_causal_signal_zscore() -> None:
     start = datetime(2024, 1, 1, tzinfo=UTC)
     rows = [

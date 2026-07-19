@@ -37,6 +37,7 @@ class StrategyPortfolioConfig(StrictModel):
     long_trend_min_return_bps: float = 0.0
     position_size: float = 1.0
     fixed_holding_periods: int | None = None
+    monthly_loss_limit: float | None = None
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> StrategyPortfolioConfig:
@@ -70,6 +71,8 @@ class StrategyPortfolioConfig(StrictModel):
             raise ValueError("position_size must be in (0, 1]")
         if self.fixed_holding_periods is not None and self.fixed_holding_periods < 1:
             raise ValueError("fixed_holding_periods must be at least 1")
+        if self.monthly_loss_limit is not None and not 0 < self.monthly_loss_limit < 1:
+            raise ValueError("monthly_loss_limit must be in (0, 1)")
         return self
 
 
@@ -107,6 +110,11 @@ class StrategyExperimentConfig(StrictModel):
             and self.portfolio.mode != "time_series_threshold"
         ):
             raise ValueError("fixed_holding_periods requires time_series_threshold portfolio")
+        if (
+            self.portfolio.monthly_loss_limit is not None
+            and self.portfolio.mode != "time_series_threshold"
+        ):
+            raise ValueError("monthly_loss_limit requires time_series_threshold portfolio")
         return self
 
     @property

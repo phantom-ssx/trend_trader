@@ -114,6 +114,7 @@ class StrategyExperimentRunner:
                 long_trend_min_return_bps=config.portfolio.long_trend_min_return_bps,
                 position_size=config.portfolio.position_size,
                 fixed_holding_periods=config.portfolio.fixed_holding_periods,
+                monthly_loss_limit=config.portfolio.monthly_loss_limit,
             )
             metrics = portfolio_metrics(returns, timeframe=config.data.timeframe)
             yearly_metrics = portfolio_yearly_metrics(
