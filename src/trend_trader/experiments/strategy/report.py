@@ -19,6 +19,9 @@ def render_strategy_report(
     portfolio_returns: pl.DataFrame,
     portfolio_metrics: pl.DataFrame,
     yearly_metrics: pl.DataFrame,
+    monthly_summary: pl.DataFrame,
+    monthly_metrics: pl.DataFrame,
+    trades: pl.DataFrame,
     combination_weights: pl.DataFrame | None = None,
 ) -> str:
     primary = summary.get("primary_metrics", {})
@@ -59,6 +62,19 @@ def render_strategy_report(
                 ("Benchmark return", _percent(primary.get("benchmark_return"))),
                 ("Benchmark Sharpe", _number(primary.get("benchmark_sharpe"))),
                 ("Relative wealth", _percent(primary.get("relative_total_return"))),
+            ]
+        )
+    primary_horizon = int(summary.get("primary_horizon", 1))
+    primary_monthly = monthly_summary.filter(
+        pl.col("horizon_bars") == primary_horizon
+    )
+    if not primary_monthly.is_empty():
+        cards.extend(
+            [
+                ("Positive months", _percent(primary_monthly["positive_month_rate"][0])),
+                ("Monthly Sharpe", _number(primary_monthly["monthly_sharpe"][0])),
+                ("Worst month", _percent(primary_monthly["worst_month_return"][0])),
+                ("Closed trades", str(primary_monthly["closed_trades"][0])),
             ]
         )
     cards_html = "".join(
@@ -106,6 +122,9 @@ svg {{ width:100%; height:auto; }}
 <h2>IC summary</h2><div class="scroll">{_table(ic_summary)}</div>
 <h2>Quantile returns</h2><div class="scroll">{_table(quantile_returns)}</div>
 <h2>Portfolio metrics</h2><div class="scroll">{_table(portfolio_metrics)}</div>
+<h2>Monthly consistency summary</h2><div class="scroll">{_table(monthly_summary)}</div>
+<h2>Monthly trade analysis</h2><div class="scroll">{_table(monthly_metrics)}</div>
+<h2>Trade log</h2><div class="scroll">{_table(trades)}</div>
 <h2>Yearly metrics</h2><div class="scroll">{_table(yearly_metrics)}</div>
 {weights_section}
 <h2>Reproducibility manifest</h2><div class="panel"><pre>{manifest}</pre></div>

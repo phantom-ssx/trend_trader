@@ -15,6 +15,9 @@ from trend_trader.experiments.factor import FactorExperimentConfig, FactorExperi
 from trend_trader.experiments.portfolio import (
     build_portfolio_returns,
     portfolio_metrics,
+    portfolio_monthly_metrics,
+    portfolio_monthly_summary,
+    portfolio_trade_log,
     portfolio_yearly_metrics,
 )
 from trend_trader.experiments.storage import ExperimentRepository
@@ -193,6 +196,9 @@ def test_time_series_threshold_portfolio_maps_signal_to_position_and_costs() -> 
     )
     metrics = portfolio_metrics(result, timeframe="1h")
     yearly = portfolio_yearly_metrics(result, timeframe="1h")
+    trades = portfolio_trade_log(result, timeframe="1h")
+    monthly = portfolio_monthly_metrics(result, timeframe="1h", trades=trades)
+    monthly_summary = portfolio_monthly_summary(monthly, trades=trades)
 
     assert result["position"].to_list() == [1.0, 0.0, -1.0, 0.0]
     assert result["turnover"].to_list() == pytest.approx([0.5, 0.5, 0.5, 0.5])
@@ -207,6 +213,21 @@ def test_time_series_threshold_portfolio_maps_signal_to_position_and_costs() -> 
     assert yearly["year"].to_list() == [2024]
     assert yearly["periods"][0] == 4
     assert yearly["position_changes"][0] == 4
+    assert trades["side"].to_list() == ["long", "short"]
+    assert trades["is_closed"].to_list() == [True, True]
+    assert trades["holding_hours"].to_list() == [1.0, 1.0]
+    assert trades["transaction_cost"].to_list() == pytest.approx([0.0016, 0.0016])
+    assert trades["strategy_return"].to_list() == pytest.approx(
+        [(1 + 0.0192) * (1 - 0.0008) - 1] * 2
+    )
+    assert monthly["month"].to_list() == ["2024-01"]
+    assert monthly["entries"][0] == 2
+    assert monthly["exits"][0] == 2
+    assert monthly["closed_trades"][0] == 2
+    assert monthly["trade_win_rate"][0] == 1.0
+    assert monthly_summary["months"][0] == 1
+    assert monthly_summary["positive_month_rate"][0] == 1.0
+    assert monthly_summary["trade_win_rate"][0] == 1.0
 
     inverted = build_portfolio_returns(
         ResearchDataset(pl.DataFrame(rows, infer_schema_length=None)),

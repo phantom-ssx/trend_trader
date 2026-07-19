@@ -25,6 +25,9 @@ from trend_trader.experiments.strategy.config import StrategyExperimentConfig
 from trend_trader.experiments.strategy.portfolio import (
     build_portfolio_returns,
     portfolio_metrics,
+    portfolio_monthly_metrics,
+    portfolio_monthly_summary,
+    portfolio_trade_log,
     portfolio_yearly_metrics,
 )
 from trend_trader.experiments.strategy.report import render_strategy_report
@@ -114,6 +117,16 @@ class StrategyExperimentRunner:
                 returns,
                 timeframe=config.data.timeframe,
             )
+            trades = portfolio_trade_log(returns, timeframe=config.data.timeframe)
+            monthly_metrics = portfolio_monthly_metrics(
+                returns,
+                timeframe=config.data.timeframe,
+                trades=trades,
+            )
+            monthly_summary = portfolio_monthly_summary(
+                monthly_metrics,
+                trades=trades,
+            )
             data_version, data_manifest = fingerprint_experiment_data(self.data, config, prepared)
             primary = _strategy_primary_metrics(
                 analysis.ic_summary,
@@ -185,6 +198,8 @@ class StrategyExperimentRunner:
                 "primary_metrics": primary,
                 "metrics_by_horizon": metrics.to_dicts(),
                 "yearly_metrics": yearly_metrics.to_dicts(),
+                "monthly_summary": monthly_summary.to_dicts(),
+                "monthly_metrics": monthly_metrics.to_dicts(),
                 "interpretation": {
                     "focus": "net portfolio return, drawdown, risk-adjusted return, and turnover",
                     "signal_ic_role": (
@@ -208,6 +223,9 @@ class StrategyExperimentRunner:
             artifacts.write_csv("portfolio_returns.csv", returns)
             artifacts.write_csv("portfolio_metrics.csv", metrics)
             artifacts.write_csv("yearly_portfolio_metrics.csv", yearly_metrics)
+            artifacts.write_csv("monthly_portfolio_summary.csv", monthly_summary)
+            artifacts.write_csv("monthly_portfolio_metrics.csv", monthly_metrics)
+            artifacts.write_csv("portfolio_trades.csv", trades)
             if combination.model_bytes is not None:
                 artifacts.write_bytes("model.pkl", combination.model_bytes)
             artifacts.write_text(
@@ -219,6 +237,9 @@ class StrategyExperimentRunner:
                     portfolio_returns=returns,
                     portfolio_metrics=metrics,
                     yearly_metrics=yearly_metrics,
+                    monthly_summary=monthly_summary,
+                    monthly_metrics=monthly_metrics,
+                    trades=trades,
                     combination_weights=combination.weights,
                 ),
             )

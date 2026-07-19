@@ -557,11 +557,430 @@ def portfolio_yearly_metrics(portfolio: pl.DataFrame, *, timeframe: str) -> pl.D
     return pl.DataFrame(rows, schema=schema, infer_schema_length=None).sort("horizon_bars", "year")
 
 
+def portfolio_trade_log(portfolio: pl.DataFrame, *, timeframe: str) -> pl.DataFrame:
+    """Reconstruct position-level trades, including entry and exit costs.
+
+    The log is available for portfolios that expose a numeric ``position`` column.
+    A trade starts when exposure changes from flat to non-zero and closes when it
+    returns to flat. Direct side flips close the old trade and open the new one at
+    the same timestamp, splitting that row's transaction cost between them.
+    """
+
+    timestamp_dtype = portfolio.schema.get("timestamp", pl.Datetime)
+    schema = {
+        "factor_name": pl.Utf8,
+        "label_name": pl.Utf8,
+        "horizon_bars": pl.Int32,
+        "trade_id": pl.Int64,
+        "side": pl.Utf8,
+        "entry_time": timestamp_dtype,
+        "exit_time": timestamp_dtype,
+        "is_closed": pl.Boolean,
+        "holding_periods": pl.Int64,
+        "holding_hours": pl.Float64,
+        "gross_return": pl.Float64,
+        "strategy_return": pl.Float64,
+        "transaction_cost": pl.Float64,
+        "max_drawdown": pl.Float64,
+        "entry_signal_value": pl.Float64,
+    }
+    if portfolio.is_empty() or "position" not in portfolio.columns:
+        return pl.DataFrame(schema=schema)
+
+    relevant = portfolio.filter(
+        (pl.col("position") != 0) | (pl.col("turnover") > 0)
+    ).sort("label_name", "horizon_bars", "timestamp")
+    if relevant.is_empty():
+        return pl.DataFrame(schema=schema)
+
+    rows: list[dict[str, object]] = []
+    for frame in relevant.partition_by(["label_name", "horizon_bars"], maintain_order=True):
+        horizon = int(frame["horizon_bars"][0])
+        holding_hours_per_period = bar_minutes(timeframe) * horizon / 60
+        trade_id = 0
+        active: dict[str, object] | None = None
+        last_exit_time = frame["exit_time"][-1]
+
+        def start_trade(
+            index: int,
+            position: float,
+            initial_cost: float,
+            trade_frame: pl.DataFrame,
+        ) -> dict[str, object]:
+            gross_return = float(trade_frame["gross_portfolio_return"][index])
+            net_return = gross_return - initial_cost
+            signal_value = (
+                trade_frame["signal_value"][index]
+                if "signal_value" in trade_frame.columns
+                else None
+            )
+            return {
+                "side_sign": 1 if position > 0 else -1,
+                "entry_time": trade_frame["timestamp"][index],
+                "gross_values": [gross_return],
+                "net_values": [net_return],
+                "transaction_cost": initial_cost,
+                "holding_periods": 1,
+                "entry_signal_value": (
+                    float(signal_value) if signal_value is not None else None
+                ),
+            }
+
+        def finish_trade(
+            trade: dict[str, object],
+            *,
+            exit_time: object,
+            is_closed: bool,
+            factor_name: object,
+            label_name: object,
+            trade_horizon: int,
+            hours_per_period: float,
+        ) -> None:
+            nonlocal trade_id
+            trade_id += 1
+            gross_values = list(trade["gross_values"])
+            net_values = list(trade["net_values"])
+            holding_periods = int(trade["holding_periods"])
+            rows.append(
+                {
+                    "factor_name": factor_name,
+                    "label_name": label_name,
+                    "horizon_bars": trade_horizon,
+                    "trade_id": trade_id,
+                    "side": "long" if int(trade["side_sign"]) > 0 else "short",
+                    "entry_time": trade["entry_time"],
+                    "exit_time": exit_time,
+                    "is_closed": is_closed,
+                    "holding_periods": holding_periods,
+                    "holding_hours": holding_periods * hours_per_period,
+                    "gross_return": math.prod(1 + value for value in gross_values) - 1,
+                    "strategy_return": math.prod(1 + value for value in net_values) - 1,
+                    "transaction_cost": float(trade["transaction_cost"]),
+                    "max_drawdown": _max_drawdown(net_values),
+                    "entry_signal_value": trade["entry_signal_value"],
+                }
+            )
+
+        for index in range(frame.height):
+            position = float(frame["position"][index])
+            side_sign = 1 if position > 0 else -1 if position < 0 else 0
+            row_cost = float(frame["transaction_cost"][index])
+            if active is None:
+                if side_sign:
+                    active = start_trade(index, position, row_cost, frame)
+                continue
+
+            active_side = int(active["side_sign"])
+            if side_sign == active_side:
+                gross_return = float(frame["gross_portfolio_return"][index])
+                active["gross_values"].append(gross_return)  # type: ignore[union-attr]
+                active["net_values"].append(gross_return - row_cost)  # type: ignore[union-attr]
+                active["transaction_cost"] = float(active["transaction_cost"]) + row_cost
+                active["holding_periods"] = int(active["holding_periods"]) + 1
+            elif side_sign == 0:
+                active["net_values"].append(-row_cost)  # type: ignore[union-attr]
+                active["transaction_cost"] = float(active["transaction_cost"]) + row_cost
+                finish_trade(
+                    active,
+                    exit_time=frame["timestamp"][index],
+                    is_closed=True,
+                    factor_name=frame["factor_name"][0],
+                    label_name=frame["label_name"][0],
+                    trade_horizon=horizon,
+                    hours_per_period=holding_hours_per_period,
+                )
+                active = None
+            else:
+                exit_cost = row_cost / 2
+                active["net_values"].append(-exit_cost)  # type: ignore[union-attr]
+                active["transaction_cost"] = float(active["transaction_cost"]) + exit_cost
+                finish_trade(
+                    active,
+                    exit_time=frame["timestamp"][index],
+                    is_closed=True,
+                    factor_name=frame["factor_name"][0],
+                    label_name=frame["label_name"][0],
+                    trade_horizon=horizon,
+                    hours_per_period=holding_hours_per_period,
+                )
+                active = start_trade(index, position, row_cost - exit_cost, frame)
+
+        if active is not None:
+            finish_trade(
+                active,
+                exit_time=last_exit_time,
+                is_closed=False,
+                factor_name=frame["factor_name"][0],
+                label_name=frame["label_name"][0],
+                trade_horizon=horizon,
+                hours_per_period=holding_hours_per_period,
+            )
+
+    return pl.DataFrame(rows, schema=schema, infer_schema_length=None).sort(
+        "horizon_bars", "entry_time"
+    )
+
+
+def portfolio_monthly_metrics(
+    portfolio: pl.DataFrame,
+    *,
+    timeframe: str,
+    trades: pl.DataFrame | None = None,
+) -> pl.DataFrame:
+    """Calendar-month return, cost, exposure, and closed-trade diagnostics."""
+
+    schema = {
+        "factor_name": pl.Utf8,
+        "label_name": pl.Utf8,
+        "horizon_bars": pl.Int32,
+        "month": pl.Utf8,
+        "periods": pl.Int64,
+        "gross_total_return": pl.Float64,
+        "strategy_return": pl.Float64,
+        "benchmark_return": pl.Float64,
+        "relative_total_return": pl.Float64,
+        "sharpe": pl.Float64,
+        "max_drawdown": pl.Float64,
+        "transaction_cost": pl.Float64,
+        "turnover": pl.Float64,
+        "total_turnover": pl.Float64,
+        "position_changes": pl.Int64,
+        "entries": pl.Int64,
+        "exits": pl.Int64,
+        "closed_trades": pl.Int64,
+        "winning_trades": pl.Int64,
+        "trade_win_rate": pl.Float64,
+        "average_trade_return": pl.Float64,
+        "worst_trade_return": pl.Float64,
+        "best_trade_return": pl.Float64,
+        "average_holding_hours": pl.Float64,
+        "long_rate": pl.Float64,
+        "short_rate": pl.Float64,
+        "flat_rate": pl.Float64,
+    }
+    if portfolio.is_empty():
+        return pl.DataFrame(schema=schema)
+
+    trades = trades if trades is not None else portfolio_trade_log(portfolio, timeframe=timeframe)
+    closed_trades = trades.filter(pl.col("is_closed")) if not trades.is_empty() else trades
+    trade_groups: dict[tuple[str, int, str], pl.DataFrame] = {}
+    if not closed_trades.is_empty():
+        closed_trades = closed_trades.with_columns(
+            pl.col("exit_time").dt.strftime("%Y-%m").alias("_month")
+        )
+        for trade_frame in closed_trades.partition_by(
+            ["label_name", "horizon_bars", "_month"], maintain_order=True
+        ):
+            trade_groups[
+                (
+                    str(trade_frame["label_name"][0]),
+                    int(trade_frame["horizon_bars"][0]),
+                    str(trade_frame["_month"][0]),
+                )
+            ] = trade_frame
+
+    base_periods_per_year = 365 * 24 * 60 / bar_minutes(timeframe)
+    if "position" in portfolio.columns:
+        position = pl.col("position")
+    else:
+        position = (
+            (pl.col("long_count") > 0).cast(pl.Int8)
+            - (pl.col("short_count") > 0).cast(pl.Int8)
+        )
+    grouped = (
+        portfolio.sort("label_name", "horizon_bars", "timestamp")
+        .with_columns(position.alias("_position"))
+        .with_columns(
+            pl.col("_position")
+            .shift(1)
+            .over("label_name", "horizon_bars")
+            .fill_null(0)
+            .alias("_previous_position"),
+            pl.col("timestamp").dt.strftime("%Y-%m").alias("month"),
+        )
+    )
+    rows: list[dict[str, object]] = []
+    for frame in grouped.partition_by(
+        ["label_name", "horizon_bars", "month"], maintain_order=True
+    ):
+        values = [float(value) for value in frame["portfolio_return"].to_list()]
+        gross_values = [float(value) for value in frame["gross_portfolio_return"].to_list()]
+        benchmark_values = [float(value) for value in frame["benchmark_return"].to_list()]
+        strategy_wealth = math.prod(1 + value for value in values)
+        benchmark_wealth = math.prod(1 + value for value in benchmark_values)
+        horizon = int(frame["horizon_bars"][0])
+        periods_per_year = base_periods_per_year / horizon
+        mean = sum(values) / len(values)
+        std = _sample_std(values)
+        month = str(frame["month"][0])
+        key = (str(frame["label_name"][0]), horizon, month)
+        month_trades = trade_groups.get(key)
+        trade_count = month_trades.height if month_trades is not None else 0
+        trade_returns = (
+            [float(value) for value in month_trades["strategy_return"].to_list()]
+            if month_trades is not None
+            else []
+        )
+        current = frame["_position"]
+        previous = frame["_previous_position"]
+        side_changed = (current.sign() != previous.sign())
+        rows.append(
+            {
+                "factor_name": frame["factor_name"][0],
+                "label_name": frame["label_name"][0],
+                "horizon_bars": horizon,
+                "month": month,
+                "periods": len(values),
+                "gross_total_return": math.prod(1 + value for value in gross_values) - 1,
+                "strategy_return": strategy_wealth - 1,
+                "benchmark_return": benchmark_wealth - 1,
+                "relative_total_return": (
+                    strategy_wealth / benchmark_wealth - 1 if benchmark_wealth > 0 else None
+                ),
+                "sharpe": mean / std * periods_per_year**0.5 if std > 0 else None,
+                "max_drawdown": _max_drawdown(values),
+                "transaction_cost": float(frame["transaction_cost"].sum()),
+                "turnover": float(frame["turnover"].mean()),
+                "total_turnover": float(frame["turnover"].sum()),
+                "position_changes": int((frame["turnover"] > 0).sum()),
+                "entries": int(((current != 0) & side_changed).sum()),
+                "exits": int(((previous != 0) & side_changed).sum()),
+                "closed_trades": trade_count,
+                "winning_trades": sum(value > 0 for value in trade_returns),
+                "trade_win_rate": (
+                    sum(value > 0 for value in trade_returns) / trade_count
+                    if trade_count
+                    else None
+                ),
+                "average_trade_return": (
+                    sum(trade_returns) / trade_count if trade_count else None
+                ),
+                "worst_trade_return": min(trade_returns) if trade_returns else None,
+                "best_trade_return": max(trade_returns) if trade_returns else None,
+                "average_holding_hours": (
+                    float(month_trades["holding_hours"].mean())
+                    if month_trades is not None
+                    else None
+                ),
+                "long_rate": float((frame["long_count"] > 0).mean()),
+                "short_rate": float((frame["short_count"] > 0).mean()),
+                "flat_rate": float(
+                    ((frame["long_count"] == 0) & (frame["short_count"] == 0)).mean()
+                ),
+            }
+        )
+    return pl.DataFrame(rows, schema=schema, infer_schema_length=None).sort(
+        "horizon_bars", "month"
+    )
+
+
+def portfolio_monthly_summary(
+    monthly_metrics: pl.DataFrame,
+    *,
+    trades: pl.DataFrame | None = None,
+) -> pl.DataFrame:
+    """Summarize monthly consistency from the first traded month onward."""
+
+    schema = {
+        "factor_name": pl.Utf8,
+        "label_name": pl.Utf8,
+        "horizon_bars": pl.Int32,
+        "months": pl.Int64,
+        "positive_month_rate": pl.Float64,
+        "negative_month_rate": pl.Float64,
+        "flat_month_rate": pl.Float64,
+        "average_monthly_return": pl.Float64,
+        "median_monthly_return": pl.Float64,
+        "monthly_sharpe": pl.Float64,
+        "worst_month_return": pl.Float64,
+        "best_month_return": pl.Float64,
+        "total_return": pl.Float64,
+        "total_transaction_cost": pl.Float64,
+        "average_monthly_entries": pl.Float64,
+        "closed_trades": pl.Int64,
+        "trade_win_rate": pl.Float64,
+        "average_trade_return": pl.Float64,
+        "median_trade_return": pl.Float64,
+        "average_holding_hours": pl.Float64,
+    }
+    if monthly_metrics.is_empty():
+        return pl.DataFrame(schema=schema)
+
+    rows: list[dict[str, object]] = []
+    for full_frame in monthly_metrics.partition_by(
+        ["label_name", "horizon_bars"], maintain_order=True
+    ):
+        first_traded = full_frame.filter(pl.col("position_changes") > 0)
+        if first_traded.is_empty():
+            frame = full_frame
+        else:
+            frame = full_frame.filter(pl.col("month") >= str(first_traded["month"][0]))
+        values = [float(value) for value in frame["strategy_return"].to_list()]
+        mean = sum(values) / len(values)
+        std = _sample_std(values)
+        horizon = int(frame["horizon_bars"][0])
+        group_trades = None
+        if trades is not None and not trades.is_empty():
+            group_trades = trades.filter(
+                (pl.col("label_name") == frame["label_name"][0])
+                & (pl.col("horizon_bars") == horizon)
+                & pl.col("is_closed")
+            )
+        trade_returns = (
+            [float(value) for value in group_trades["strategy_return"].to_list()]
+            if group_trades is not None
+            else []
+        )
+        rows.append(
+            {
+                "factor_name": frame["factor_name"][0],
+                "label_name": frame["label_name"][0],
+                "horizon_bars": horizon,
+                "months": len(values),
+                "positive_month_rate": sum(value > 0 for value in values) / len(values),
+                "negative_month_rate": sum(value < 0 for value in values) / len(values),
+                "flat_month_rate": sum(value == 0 for value in values) / len(values),
+                "average_monthly_return": mean,
+                "median_monthly_return": _median(values),
+                "monthly_sharpe": mean / std * 12**0.5 if std > 0 else None,
+                "worst_month_return": min(values),
+                "best_month_return": max(values),
+                "total_return": math.prod(1 + value for value in values) - 1,
+                "total_transaction_cost": float(frame["transaction_cost"].sum()),
+                "average_monthly_entries": float(frame["entries"].mean()),
+                "closed_trades": len(trade_returns),
+                "trade_win_rate": (
+                    sum(value > 0 for value in trade_returns) / len(trade_returns)
+                    if trade_returns
+                    else None
+                ),
+                "average_trade_return": (
+                    sum(trade_returns) / len(trade_returns) if trade_returns else None
+                ),
+                "median_trade_return": _median(trade_returns) if trade_returns else None,
+                "average_holding_hours": (
+                    float(group_trades["holding_hours"].mean())
+                    if group_trades is not None and not group_trades.is_empty()
+                    else None
+                ),
+            }
+        )
+    return pl.DataFrame(rows, schema=schema, infer_schema_length=None).sort("horizon_bars")
+
+
 def _sample_std(values: list[float]) -> float:
     if len(values) < 2:
         return 0.0
     mean = sum(values) / len(values)
     return (sum((value - mean) ** 2 for value in values) / (len(values) - 1)) ** 0.5
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / 2
 
 
 def _max_drawdown(values: list[float]) -> float:
