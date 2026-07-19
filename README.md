@@ -588,11 +588,20 @@ wide_frame = result.to_wide()
 - 价格趋势：`momentum`、`ma_spread`、`trend_slope`、`breakout`、
   `mean_reversion`。
 - 波动率：`historical_volatility`、`atr`、`volatility_change`、
-  `up_down_volatility_asymmetry`。
+  `up_down_volatility_asymmetry`、`realized_skewness`、`realized_kurtosis`。
 - 成交和流动性：`volume_change`、`turnover`、`amihud`、
   `volume_price_divergence`。
+- 分钟微观结构：`quarter_hour_volume_pressure`。它用 K 线收盘位置和相对成交额构造
+  每 15 分钟边界的成交方向压力；这是 OHLCV 代理，并不等同于逐笔成交的真实订单失衡。
 - 衍生品和规模：`funding_rate`、`basis`、`open_interest`、`market_cap`、
   `long_short_ratio`、`liquidation_imbalance`、`taker_imbalance`。
+
+新增分钟因子的研究依据包括 2026 年的
+[The Quarter-Hour Effect](https://arxiv.org/abs/2607.09426)（永续合约 15 分钟边界订单流与
+中期收益预测）以及 2024 年的
+[Time-varying expected returns, conditional skewness and Bitcoin return predictability](https://doi.org/10.1016/j.qref.2024.101868)。
+实现只使用当前及历史 K 线；`FactorClient` 仍会把结果时间平移到下一根 K 线开盘，避免
+把尚未完成的分钟 K 线用于交易。
 
 处理流水线依次执行非有限值过滤、异常值处理、标准化和可选截面中性化。
 中性化暴露使用注册因子的原始值，例如：
@@ -816,7 +825,9 @@ portfolio:
 ```
 
 完整 1 分钟示例见
-`configs/experiments/strategy/eth_1m_linear_predict_60m_extreme_long_v2.yaml`。因子时间戳代表
+`configs/experiments/strategy/eth_1m_linear_predict_60m_skew_extreme_long_v3.yaml`。该版本在
+2020–2024 开发段筛选因子、并用 2025–2026 样本外区间复核方向稳定性，加入 4 小时
+`realized_skewness` 后再提高极端信号门槛。因子时间戳代表
 信号完成后的第一个可交易开盘；标签和组合收益均按 next-open 语义计算。零成交量的入场
 或退出分钟不参与因子评价，也不允许换仓；已有持仓仍会连续盯市。策略摘要分别记录
 `prediction_horizon`（组合训练/预测周期）和 `execution_horizon`（组合收益记账与调仓周期），

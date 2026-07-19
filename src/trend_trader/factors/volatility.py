@@ -109,9 +109,49 @@ class UpDownVolatilityAsymmetryFactor(Factor):
         )
 
 
+class RealizedSkewnessFactor(Factor):
+    """Rolling non-parametric skewness of intrabar log returns."""
+
+    name = "realized_skewness"
+
+    def required_history_bars(self, spec: FactorSpec, bar_type: str) -> int:
+        return positive_int(spec.params, "period", 1440) + 1
+
+    def compute(
+        self, inputs: Mapping[DataType, pl.DataFrame], spec: FactorSpec, bar_type: str
+    ) -> pl.DataFrame:
+        period = positive_int(spec.params, "period", 1440)
+        returns = _log_return()
+        second = returns.pow(2).rolling_sum(period, min_samples=period)
+        third = returns.pow(3).rolling_sum(period, min_samples=period)
+        value = pl.when(second > 0).then(period**0.5 * third / second.pow(1.5))
+        return inputs[DataType.CANDLES].select("timestamp", value.alias("raw_value"))
+
+
+class RealizedKurtosisFactor(Factor):
+    """Rolling non-parametric kurtosis of intrabar log returns."""
+
+    name = "realized_kurtosis"
+
+    def required_history_bars(self, spec: FactorSpec, bar_type: str) -> int:
+        return positive_int(spec.params, "period", 1440) + 1
+
+    def compute(
+        self, inputs: Mapping[DataType, pl.DataFrame], spec: FactorSpec, bar_type: str
+    ) -> pl.DataFrame:
+        period = positive_int(spec.params, "period", 1440)
+        returns = _log_return()
+        second = returns.pow(2).rolling_sum(period, min_samples=period)
+        fourth = returns.pow(4).rolling_sum(period, min_samples=period)
+        value = pl.when(second > 0).then(period * fourth / second.pow(2))
+        return inputs[DataType.CANDLES].select("timestamp", value.alias("raw_value"))
+
+
 VOLATILITY_FACTORS = (
     HistoricalVolatilityFactor(),
     AtrFactor(),
     VolatilityChangeFactor(),
     UpDownVolatilityAsymmetryFactor(),
+    RealizedSkewnessFactor(),
+    RealizedKurtosisFactor(),
 )

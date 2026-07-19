@@ -61,6 +61,9 @@ def test_registry_contains_all_initial_factors() -> None:
         "mean_reversion",
         "momentum",
         "open_interest",
+        "quarter_hour_volume_pressure",
+        "realized_kurtosis",
+        "realized_skewness",
         "taker_imbalance",
         "trend_slope",
         "turnover",
@@ -134,6 +137,57 @@ def test_momentum_uses_only_current_and_past_prices() -> None:
     expected = pytest.approx(math.log(124 / 100))
     assert result["raw_value"][23] is None
     assert result["raw_value"][24] == expected
+
+
+def test_realized_moments_match_standard_non_parametric_estimators() -> None:
+    closes = [100.0, 101.0, 99.0, 102.0, 101.0]
+    candles = candle_frame(len(closes)).with_columns(pl.Series("close", closes))
+    returns = [math.log(closes[index] / closes[index - 1]) for index in range(1, len(closes))]
+    second = sum(value**2 for value in returns)
+    expected_skewness = len(returns) ** 0.5 * sum(value**3 for value in returns) / second**1.5
+    expected_kurtosis = len(returns) * sum(value**4 for value in returns) / second**2
+
+    skewness = default_registry.get("realized_skewness").compute(
+        {DataType.CANDLES: candles},
+        FactorSpec("realized_skewness", {"period": len(returns)}),
+        "1h",
+    )
+    kurtosis = default_registry.get("realized_kurtosis").compute(
+        {DataType.CANDLES: candles},
+        FactorSpec("realized_kurtosis", {"period": len(returns)}),
+        "1h",
+    )
+
+    assert skewness["raw_value"][-1] == pytest.approx(expected_skewness)
+    assert kurtosis["raw_value"][-1] == pytest.approx(expected_kurtosis)
+
+
+def test_quarter_hour_volume_pressure_is_causal_and_boundary_specific() -> None:
+    size = 75
+    candles = candle_frame(size).with_columns(
+        pl.datetime_range(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, tzinfo=UTC) + timedelta(minutes=size - 1),
+            interval="1m",
+            eager=True,
+            time_zone="UTC",
+        ).alias("timestamp"),
+        pl.lit(100.0).alias("open"),
+        pl.lit(102.0).alias("high"),
+        pl.lit(98.0).alias("low"),
+        pl.lit(101.0).alias("close"),
+        pl.lit(1000.0).alias("volume_quote"),
+    )
+    result = default_registry.get("quarter_hour_volume_pressure").compute(
+        {DataType.CANDLES: candles},
+        FactorSpec("quarter_hour_volume_pressure", {"volume_period": 60}),
+        "1m",
+    )
+
+    assert result["raw_value"][58] is None
+    assert result["raw_value"][59] == 0.0
+    assert result["raw_value"][60] == pytest.approx(0.5)
+    assert result["raw_value"][61] == 0.0
 
 
 def test_cross_sectional_standardization_marks_small_sections_invalid() -> None:
