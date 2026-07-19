@@ -1,0 +1,196 @@
+<div id="strategy-trades-2026-h1" class="strategy-trades-vis">
+  <div class="viz-grid strategy-summary" aria-label="Strategy period summary">
+    <div class="card viz-stat">
+      <div class="text-muted">2026 H1 return</div>
+      <div class="viz-stat-value" data-stat="return"></div>
+      <div class="text-small text-muted">2.25×, after 5bp fee + 3bp slippage</div>
+    </div>
+    <div class="card viz-stat">
+      <div class="text-muted">Maximum drawdown</div>
+      <div class="viz-stat-value" data-stat="drawdown"></div>
+      <div class="text-small text-muted">Daily mark-to-market</div>
+    </div>
+    <div class="card viz-stat">
+      <div class="text-muted">Position changes</div>
+      <div class="viz-stat-value" data-stat="trades"></div>
+      <div class="text-small text-muted" data-stat="trade-detail"></div>
+    </div>
+  </div>
+
+  <div class="viz-controls" aria-label="Trade marker controls">
+    <label class="form-check"><input class="form-check-input" type="checkbox" id="show-1m" checked><span class="form-check-label">1m · 20%</span></label>
+    <label class="form-check"><input class="form-check-input" type="checkbox" id="show-24h" checked><span class="form-check-label">ETH 24h · 50%</span></label>
+    <label class="form-check"><input class="form-check-input" type="checkbox" id="show-168h" checked><span class="form-check-label">ETH 168h · 20%</span></label>
+    <label class="form-check"><input class="form-check-input" type="checkbox" id="show-btc" checked><span class="form-check-label">BTC 72h · 10%</span></label>
+    <button class="btn btn-ghost" type="button" id="fit-all"><i data-lucide="maximize-2" aria-hidden="true"></i> Fit range</button>
+  </div>
+
+  <section class="strategy-chart-section" aria-labelledby="eth-chart-label">
+    <div class="strategy-chart-heading">
+      <span id="eth-chart-label">ETH-USDT-SWAP · 4h</span>
+      <span class="text-small text-muted">▲ long · ▼ short · ● exit</span>
+    </div>
+    <div id="eth-price-chart" class="strategy-price-chart" role="img" aria-label="ETH four-hour candlesticks with one-minute, 24-hour, and 168-hour strategy trades"></div>
+  </section>
+
+  <section class="strategy-chart-section" aria-labelledby="btc-chart-label">
+    <div class="strategy-chart-heading">
+      <span id="btc-chart-label">BTC-USDT-SWAP · 4h</span>
+      <span class="text-small text-muted">BTC 72h trades</span>
+    </div>
+    <div id="btc-price-chart" class="strategy-price-chart strategy-price-chart-small" role="img" aria-label="BTC four-hour candlesticks with 72-hour strategy trades"></div>
+  </section>
+
+  <section class="strategy-chart-section" aria-labelledby="equity-chart-label">
+    <div class="strategy-chart-heading">
+      <span id="equity-chart-label">Portfolio return & drawdown</span>
+      <span class="text-small text-muted">daily, %</span>
+    </div>
+    <div id="portfolio-chart" class="strategy-equity-chart" role="img" aria-label="Low-leverage portfolio cumulative return and drawdown"></div>
+  </section>
+
+  <div class="table-responsive">
+    <table class="table table-sm" aria-label="Monthly portfolio returns">
+      <thead><tr id="monthly-head"></tr></thead>
+      <tbody><tr id="monthly-values"></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<style>
+  #strategy-trades-2026-h1 { color: var(--foreground); }
+  #strategy-trades-2026-h1 .strategy-summary { margin-bottom: 12px; }
+  #strategy-trades-2026-h1 .viz-controls { margin-bottom: 14px; }
+  #strategy-trades-2026-h1 .strategy-chart-section { margin-top: 14px; }
+  #strategy-trades-2026-h1 .strategy-chart-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 5px; font-weight: 500; }
+  #strategy-trades-2026-h1 .strategy-price-chart { width: 100%; height: 330px; }
+  #strategy-trades-2026-h1 .strategy-price-chart-small { height: 260px; }
+  #strategy-trades-2026-h1 .strategy-equity-chart { width: 100%; height: 220px; }
+  #strategy-trades-2026-h1 .table-responsive { margin-top: 12px; }
+  #strategy-trades-2026-h1 .monthly-positive { color: var(--viz-series-1); }
+  #strategy-trades-2026-h1 .monthly-negative { color: var(--destructive); }
+  @media (max-width: 520px) {
+    #strategy-trades-2026-h1 .strategy-chart-heading { align-items: flex-start; flex-direction: column; gap: 2px; }
+    #strategy-trades-2026-h1 .strategy-price-chart { height: 280px; }
+    #strategy-trades-2026-h1 .strategy-price-chart-small { height: 230px; }
+  }
+</style>
+
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+(() => {
+  const root = document.getElementById('strategy-trades-2026-h1');
+  const DATA = __STRATEGY_DATA__;
+  const color = name => {
+    const probe = document.createElement('span');
+    probe.style.color = `var(${name})`;
+    root.appendChild(probe);
+    const resolved = getComputedStyle(probe).color;
+    probe.remove();
+    return resolved;
+  };
+  const alpha = (value, opacity) => {
+    const channels = value.match(/[\d.]+/g);
+    return channels && channels.length >= 3
+      ? `rgba(${channels[0]}, ${channels[1]}, ${channels[2]}, ${opacity})`
+      : value;
+  };
+  const palette = {
+    up: color('--viz-series-1'),
+    down: color('--destructive'),
+    minute: color('--viz-series-2'),
+    h24: color('--viz-series-3'),
+    h168: color('--viz-series-4'),
+    btc: color('--viz-series-5'),
+    equity: color('--viz-series-1'),
+    drawdown: color('--destructive'),
+    text: color('--foreground'),
+    muted: color('--muted-foreground'),
+    border: color('--border')
+  };
+  root.querySelector('[data-stat="return"]').textContent = `${DATA.stats.return >= 0 ? '+' : ''}${DATA.stats.return.toFixed(2)}%`;
+  root.querySelector('[data-stat="drawdown"]').textContent = `${DATA.stats.maxDrawdown.toFixed(2)}%`;
+  root.querySelector('[data-stat="trades"]').textContent = DATA.stats.tradeChanges.toLocaleString();
+  root.querySelector('[data-stat="trade-detail"]').textContent = `1m ${DATA.stats.sleeveTrades['1m']} · 24h ${DATA.stats.sleeveTrades['24h']} · 168h ${DATA.stats.sleeveTrades['168h']} · BTC ${DATA.stats.sleeveTrades['BTC 72h']}`;
+
+  const baseOptions = container => ({
+    width: container.clientWidth,
+    height: container.clientHeight,
+    layout: { background: { color: 'transparent' }, textColor: palette.muted },
+    grid: { vertLines: { color: palette.border }, horzLines: { color: palette.border } },
+    rightPriceScale: { borderColor: palette.border },
+    timeScale: { borderColor: palette.border, timeVisible: true, secondsVisible: false },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    localization: { locale: 'zh-CN' }
+  });
+  const makePriceChart = (container, data) => {
+    const chart = LightweightCharts.createChart(container, baseOptions(container));
+    const series = chart.addCandlestickSeries({
+      upColor: palette.up,
+      downColor: palette.down,
+      borderUpColor: palette.up,
+      borderDownColor: palette.down,
+      wickUpColor: palette.up,
+      wickDownColor: palette.down
+    });
+    series.setData(data);
+    chart.timeScale().fitContent();
+    return { chart, series, container };
+  };
+  const eth = makePriceChart(root.querySelector('#eth-price-chart'), DATA.ethCandles);
+  const btc = makePriceChart(root.querySelector('#btc-price-chart'), DATA.btcCandles);
+  const markerColors = { '1m': palette.minute, '24h': palette.h24, '168h': palette.h168, 'BTC 72h': palette.btc };
+  const selectedSleeves = () => new Set([
+    root.querySelector('#show-1m').checked ? '1m' : null,
+    root.querySelector('#show-24h').checked ? '24h' : null,
+    root.querySelector('#show-168h').checked ? '168h' : null
+  ].filter(Boolean));
+  const updateMarkers = () => {
+    const enabled = selectedSleeves();
+    eth.series.setMarkers(DATA.ethMarkers.filter(item => enabled.has(item.sleeve)).map(item => ({ ...item, color: markerColors[item.sleeve] })));
+    btc.series.setMarkers(root.querySelector('#show-btc').checked ? DATA.btcMarkers.map(item => ({ ...item, color: markerColors[item.sleeve] })) : []);
+  };
+  ['show-1m', 'show-24h', 'show-168h', 'show-btc'].forEach(id => root.querySelector(`#${id}`).addEventListener('change', updateMarkers));
+  updateMarkers();
+
+  const equityContainer = root.querySelector('#portfolio-chart');
+  const portfolio = LightweightCharts.createChart(equityContainer, baseOptions(equityContainer));
+  const equitySeries = portfolio.addAreaSeries({
+    lineColor: palette.equity,
+    topColor: alpha(palette.equity, 0.24),
+    bottomColor: alpha(palette.equity, 0.02),
+    lineWidth: 2,
+    priceFormat: { type: 'custom', formatter: value => `${value.toFixed(1)}%` }
+  });
+  const drawdownSeries = portfolio.addLineSeries({
+    color: palette.drawdown,
+    lineWidth: 1,
+    priceScaleId: 'left',
+    priceFormat: { type: 'custom', formatter: value => `${value.toFixed(1)}%` }
+  });
+  portfolio.priceScale('left').applyOptions({ borderColor: palette.border, scaleMargins: { top: 0.72, bottom: 0.02 } });
+  portfolio.priceScale('right').applyOptions({ scaleMargins: { top: 0.08, bottom: 0.30 } });
+  equitySeries.setData(DATA.equity);
+  drawdownSeries.setData(DATA.drawdown);
+  portfolio.timeScale().fitContent();
+
+  const head = root.querySelector('#monthly-head');
+  const values = root.querySelector('#monthly-values');
+  DATA.monthly.forEach(item => {
+    const th = document.createElement('th');
+    th.scope = 'col';
+    th.className = 'text-center text-nowrap';
+    th.textContent = item.month.slice(5);
+    head.appendChild(th);
+    const td = document.createElement('td');
+    td.className = `text-center text-nowrap ${item.return >= 0 ? 'monthly-positive' : 'monthly-negative'}`;
+    td.textContent = `${item.return >= 0 ? '+' : ''}${item.return.toFixed(1)}%`;
+    values.appendChild(td);
+  });
+
+  const charts = [eth, btc, { chart: portfolio, container: equityContainer }];
+  const resize = () => charts.forEach(item => item.chart.applyOptions({ width: item.container.clientWidth, height: item.container.clientHeight }));
+  new ResizeObserver(resize).observe(root);
+  root.querySelector('#fit-all').addEventListener('click', () => charts.forEach(item => item.chart.timeScale().fitContent()));
+})();
+</script>
