@@ -1,0 +1,89 @@
+experiment:
+  name: eth_1m_v3_ma_kdj_tuned_v1
+  description: >-
+    V3 extreme long-only signal with tuned multiscale periods and low-weight
+    MA-spread and KDJ confirmation factors.
+  allow_dirty_git: false
+
+data:
+  start: "2020-01-03"
+  end: "2026-07-11"
+  timeframe: "1m"
+  universe:
+    mode: explicit
+    venue: OKX
+    instruments: [ETH-USDT-SWAP]
+
+factors:
+  - name: momentum
+    alias: momentum_2h
+    params: {lookback: 120}
+  - name: momentum
+    alias: momentum_6h
+    params: {lookback: 360}
+  - name: mean_reversion
+    alias: mean_reversion_8h
+    params: {period: 480}
+  - name: up_down_volatility_asymmetry
+    alias: volatility_asymmetry_8h
+    params: {period: 480}
+  - name: realized_skewness
+    alias: realized_skewness_6h
+    params: {period: 360}
+  - name: ma_spread
+    alias: ma_spread_1h_4h
+    params: {fast_period: 60, slow_period: 240}
+  - name: kdj
+    alias: kdj_4h
+    params:
+      lookback: 240
+      k_smoothing: 5
+      d_smoothing: 5
+      component: j
+
+combination:
+  method: linear
+  name: eth_1m_v3_ma_kdj_score
+  training_horizon: 60
+  params:
+    weights:
+      momentum_2h: -0.2029
+      momentum_6h: -0.1496
+      mean_reversion_8h: 0.1873
+      volatility_asymmetry_8h: 0.1959
+      realized_skewness_6h: -0.1999
+      ma_spread_1h_4h: -0.0471
+      kdj_4h: -0.0173
+    normalize_weights: true
+    missing: drop
+
+label:
+  price: next_open
+  horizons: [1, 60]
+
+preprocess:
+  normalize: zscore
+  normalize_scope: time_series
+  rolling_window: 43200
+  rolling_min_periods: 14400
+
+evaluation:
+  scope: time_series
+  quantiles: 5
+  ic_method: spearman
+  min_cross_section: 2
+  stability_period: 3mo
+  stability_min_observations: 10080
+  primary_horizon: 1
+
+portfolio:
+  mode: time_series_threshold
+  signal_smoothing_periods: 60
+  signal_standardization_periods: 129600
+  signal_standardization_min_periods: 129600
+  long_threshold_zscore: 3.5
+  short_threshold_zscore: null
+
+cost:
+  fee_bps: 5
+  slippage_bps: 3

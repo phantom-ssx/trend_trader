@@ -54,6 +54,7 @@ def test_registry_contains_all_initial_factors() -> None:
         "breakout",
         "funding_rate",
         "historical_volatility",
+        "kdj",
         "liquidation_imbalance",
         "long_short_ratio",
         "ma_spread",
@@ -139,6 +140,33 @@ def test_momentum_uses_only_current_and_past_prices() -> None:
     expected = pytest.approx(math.log(124 / 100))
     assert result["raw_value"][23] is None
     assert result["raw_value"][24] == expected
+
+
+def test_kdj_is_causal_and_supports_configurable_components() -> None:
+    candles = candle_frame(30)
+    factor = default_registry.get("kdj")
+    spec = FactorSpec(
+        "kdj",
+        {"lookback": 5, "k_smoothing": 2, "d_smoothing": 2, "component": "j"},
+    )
+
+    original = factor.compute({DataType.CANDLES: candles}, spec, "1h")
+    changed_future = candles.with_columns(
+        pl.when(pl.int_range(pl.len()) >= 20)
+        .then(pl.col("close") * 2)
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+    perturbed = factor.compute({DataType.CANDLES: changed_future}, spec, "1h")
+
+    assert original["raw_value"][:20].to_list() == perturbed["raw_value"][:20].to_list()
+    assert original["raw_value"].drop_nulls().len() > 0
+    with pytest.raises(ValueError, match="KDJ component"):
+        factor.compute(
+            {DataType.CANDLES: candles},
+            FactorSpec("kdj", {"component": "invalid"}),
+            "1h",
+        )
 
 
 def test_realized_moments_match_standard_non_parametric_estimators() -> None:

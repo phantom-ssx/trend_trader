@@ -49,6 +49,54 @@ class MaSpreadFactor(Factor):
         )
 
 
+class KdjFactor(Factor):
+    """Causal stochastic KDJ oscillator with configurable output component."""
+
+    name = "kdj"
+
+    def required_history_bars(self, spec: FactorSpec, bar_type: str) -> int:
+        return (
+            positive_int(spec.params, "lookback", 9)
+            + positive_int(spec.params, "k_smoothing", 3)
+            + positive_int(spec.params, "d_smoothing", 3)
+        )
+
+    def compute(
+        self, inputs: Mapping[DataType, pl.DataFrame], spec: FactorSpec, bar_type: str
+    ) -> pl.DataFrame:
+        lookback = positive_int(spec.params, "lookback", 9)
+        k_smoothing = positive_int(spec.params, "k_smoothing", 3)
+        d_smoothing = positive_int(spec.params, "d_smoothing", 3)
+        component = str(spec.params.get("component", "j")).strip().lower()
+        if component not in {"k", "d", "j", "j_minus_d"}:
+            raise ValueError("KDJ component must be one of: k, d, j, j_minus_d")
+
+        lowest = pl.col("low").rolling_min(lookback, min_samples=lookback)
+        highest = pl.col("high").rolling_max(lookback, min_samples=lookback)
+        width = highest - lowest
+        rsv = pl.when(width > 0).then((pl.col("close") - lowest) / width)
+        k_value = rsv.ewm_mean(
+            alpha=1 / k_smoothing,
+            adjust=False,
+            min_samples=k_smoothing,
+        )
+        d_value = k_value.ewm_mean(
+            alpha=1 / d_smoothing,
+            adjust=False,
+            min_samples=d_smoothing,
+        )
+        values = {
+            "k": k_value,
+            "d": d_value,
+            "j": 3 * k_value - 2 * d_value,
+            "j_minus_d": 3 * (k_value - d_value),
+        }
+        return inputs[DataType.CANDLES].select(
+            "timestamp",
+            values[component].alias("raw_value"),
+        )
+
+
 class TrendSlopeFactor(Factor):
     name = "trend_slope"
 
@@ -134,6 +182,7 @@ class MeanReversionFactor(Factor):
 PRICE_FACTORS = (
     MomentumFactor(),
     MaSpreadFactor(),
+    KdjFactor(),
     TrendSlopeFactor(),
     BreakoutFactor(),
     MeanReversionFactor(),
