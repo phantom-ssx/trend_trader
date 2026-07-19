@@ -28,8 +28,8 @@ def render_strategy_report(
     )
     return_label = "Long-short return" if portfolio_mode == "long_short" else "Portfolio return"
     cards = [
-        ("Raw signal mean IC", _number(primary.get("signal_mean_ic"))),
-        ("Raw signal ICIR", _number(primary.get("signal_ic_ir"))),
+        ("Prediction-horizon mean IC", _number(primary.get("signal_mean_ic"))),
+        ("Prediction-horizon ICIR", _number(primary.get("signal_ic_ir"))),
         (return_label, _percent(primary.get("portfolio_return"))),
         ("Annual return", _percent(primary.get("annual_return"))),
         ("Sharpe", _number(primary.get("sharpe"))),

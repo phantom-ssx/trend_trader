@@ -54,6 +54,7 @@ class WalkForwardModelCombiner(FactorCombiner):
         embargo_bars = int(params.get("embargo_bars", 0))
         label_lag_bars = int(params.get("label_lag_bars", 1))
         min_present_factors = int(params.get("min_present_factors", 1))
+        target_transform = str(params.get("target_transform", "none")).lower()
         if min_observations < 2 or min_periods < 2 or retrain_every <= 0:
             raise ValueError("invalid walk-forward training minimums")
         if train_window is not None and train_window < min_periods:
@@ -64,6 +65,8 @@ class WalkForwardModelCombiner(FactorCombiner):
             or not 1 <= min_present_factors <= len(request.factor_names)
         ):
             raise ValueError("invalid embargo or min_present_factors")
+        if target_transform not in {"none", "demean", "zscore"}:
+            raise ValueError("target_transform must be none, demean, or zscore")
 
         bar_types = features["bar_type"].unique().to_list()
         if len(bar_types) != 1:
@@ -97,7 +100,10 @@ class WalkForwardModelCombiner(FactorCombiner):
                 period_count = eligible["timestamp"].n_unique()
                 if eligible.height >= min_observations and period_count >= min_periods:
                     x_train = _matrix(eligible, request.factor_names)
-                    y_train = np.asarray(eligible["label_value"].to_list(), dtype=float)
+                    y_train = _transform_target(
+                        np.asarray(eligible["label_value"].to_list(), dtype=float),
+                        target_transform,
+                    )
                     if not np.isnan(x_train).all(axis=0).any():
                         candidate = _build_model(model_name, model_params)
                         candidate.fit(x_train, y_train)
@@ -148,6 +154,7 @@ class WalkForwardModelCombiner(FactorCombiner):
             "train_window_periods": train_window,
             "embargo_bars": embargo_bars,
             "label_lag_bars": label_lag_bars,
+            "target_transform": target_transform,
             "sklearn_version": _sklearn_version(),
             "leakage_guard": (
                 "training labels satisfy exit_time + label lag + embargo <= prediction timestamp"
@@ -219,6 +226,16 @@ def _build_model(model_name: str, params: dict[str, Any]) -> Any:
 def _matrix(frame: pl.DataFrame, factors: tuple[str, ...]) -> np.ndarray:
     values = frame.select(*factors).to_numpy()
     return np.asarray(values, dtype=float)
+
+
+def _transform_target(values: np.ndarray, method: str) -> np.ndarray:
+    if method == "none":
+        return values
+    centered = values - float(np.mean(values))
+    if method == "demean":
+        return centered
+    scale = float(np.std(centered))
+    return centered / scale if scale > 0 else centered
 
 
 def _model_weights(

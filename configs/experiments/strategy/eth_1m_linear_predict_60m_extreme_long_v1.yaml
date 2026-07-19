@@ -1,0 +1,78 @@
+experiment:
+  name: eth_1m_linear_predict_60m_extreme_long_v1
+  allow_dirty_git: true
+
+data:
+  start: "2020-01-03"
+  end: "2026-07-11"
+  timeframe: "1m"
+  universe:
+    mode: explicit
+    venue: OKX
+    instruments: [ETH-USDT-SWAP]
+
+factors:
+  - name: momentum
+    alias: momentum_1h
+    params: {lookback: 60}
+  - name: momentum
+    alias: momentum_4h
+    params: {lookback: 240}
+  - name: mean_reversion
+    alias: mean_reversion_4h
+    params: {period: 240}
+  - name: up_down_volatility_asymmetry
+    alias: volatility_asymmetry_4h
+    params: {period: 240}
+  - name: historical_volatility
+    alias: volatility_24h
+    params: {period: 1440, annualize: true}
+
+combination:
+  method: linear
+  name: eth_1m_direction_score
+  training_horizon: 60
+  params:
+    weights:
+      momentum_1h: -0.20
+      momentum_4h: -0.20
+      mean_reversion_4h: 0.30
+      volatility_asymmetry_4h: 0.20
+      volatility_24h: 0.10
+    normalize_weights: true
+    missing: drop
+
+label:
+  price: next_open
+  horizons: [1, 60, 120, 240]
+
+preprocess:
+  winsorize:
+    lower: 0.01
+    upper: 0.99
+    scope: time_series
+  normalize: zscore
+  normalize_scope: time_series
+  rolling_window: 43200
+  rolling_min_periods: 14400
+
+evaluation:
+  scope: time_series
+  quantiles: 5
+  ic_method: spearman
+  min_cross_section: 2
+  stability_period: 3mo
+  stability_min_observations: 10080
+  primary_horizon: 1
+
+portfolio:
+  mode: time_series_threshold
+  signal_smoothing_periods: 60
+  signal_standardization_periods: 129600
+  signal_standardization_min_periods: 129600
+  long_threshold_zscore: 3.5
+  short_threshold_zscore: null
+
+cost:
+  fee_bps: 5
+  slippage_bps: 3

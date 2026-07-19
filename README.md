@@ -800,6 +800,28 @@ SQLite 同时保存 Git commit、因子声明版本与源码哈希、完整配�
 策略实验另外记录成本、年化收益、Sharpe、最大回撤和换手率；组合成本按每次权重变化
 对应的换手收取，持仓不变时不会重复收取完整双边成本。
 
+单品种分钟策略可使用 `time_series_threshold` 在每根分钟 K 线结束后更新信号，并用
+滚动标准化后的阈值控制交易频率。例如下面的配置会先平滑 60 根 K 线，再用只包含当前
+和历史信号的 90 日窗口计算 z-score；只有信号超过 3.5 个标准差才在下一根 K 线开盘
+入场：
+
+```yaml
+portfolio:
+  mode: time_series_threshold
+  signal_smoothing_periods: 60
+  signal_standardization_periods: 129600
+  signal_standardization_min_periods: 129600
+  long_threshold_zscore: 3.5
+  short_threshold_zscore: null
+```
+
+完整 1 分钟示例见
+`configs/experiments/strategy/eth_1m_linear_predict_60m_extreme_long_v2.yaml`。因子时间戳代表
+信号完成后的第一个可交易开盘；标签和组合收益均按 next-open 语义计算。零成交量的入场
+或退出分钟不参与因子评价，也不允许换仓；已有持仓仍会连续盯市。策略摘要分别记录
+`prediction_horizon`（组合训练/预测周期）和 `execution_horizon`（组合收益记账与调仓周期），
+避免把“预测未来 60 分钟”误写成“只在第 60 分钟才能交易”。
+
 ## 多因子组合层
 
 `trend_trader.combinations` 把多个已完成异常值处理、标准化和可选中性化的因子合成
@@ -885,6 +907,7 @@ combination:
     train_window_periods: 8760
     retrain_every: 168
     embargo_bars: 1
+    target_transform: demean  # none/demean/zscore；仅用当次训练窗口估计
 ```
 
 多层感知机配置：

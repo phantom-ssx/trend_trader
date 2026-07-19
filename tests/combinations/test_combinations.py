@@ -185,6 +185,33 @@ def test_machine_learning_and_deep_learning_are_walk_forward() -> None:
     assert "deep_learning" in default_combination_registry.methods()
 
 
+def test_machine_learning_can_predict_demeaned_returns() -> None:
+    dataset = _dataset(periods=9)
+    result = FactorCombinationClient().combine(
+        dataset,
+        FactorCombinationRequest(
+            method="machine_learning",
+            factor_names=("quality", "reversal"),
+            name="demeaned_ridge_model",
+            training_horizon=1,
+            params={
+                "model": "ridge",
+                "model_params": {"alpha": 0.01},
+                "min_train_observations": 10,
+                "min_train_periods": 2,
+                "retrain_every": 20,
+                "target_transform": "demean",
+            },
+        ),
+    )
+
+    first_timestamp = result.dataset.valid()["timestamp"].min()
+    scores = result.dataset.valid().filter(pl.col("timestamp") == first_timestamp)
+
+    assert scores["value"].mean() == pytest.approx(0.0, abs=1e-12)
+    assert result.diagnostics["target_transform"] == "demean"
+
+
 def _dataset(*, periods: int) -> ResearchDataset:
     rows: list[dict[str, object]] = []
     start = datetime(2024, 1, 1, tzinfo=UTC)

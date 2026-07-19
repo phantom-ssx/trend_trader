@@ -60,6 +60,23 @@ def test_execution_label_rejects_non_contiguous_horizons() -> None:
     assert first["label_quality_flags"] == "NON_CONTIGUOUS_HORIZON"
 
 
+def test_execution_label_rejects_zero_volume_entry_and_exit() -> None:
+    frame = candles([100, 101, 102]).with_columns(pl.Series("volume", [1.0, 0.0, 1.0]))
+
+    result = ExecutionReturnLabeler().compute(
+        frame, [ExecutionReturnSpec(horizon_bars=1)]
+    ).frame
+
+    assert result["label_is_valid"].to_list() == [False, False, False]
+    assert result["label_quality_flags"].to_list() == [
+        "NON_TRADING_EXIT",
+        "NON_TRADING_ENTRY",
+        "MISSING_FUTURE_PRICE",
+    ]
+    assert result["gross_return"].to_list()[:2] == pytest.approx([0.01, 102 / 101 - 1])
+    assert result["label_value"].to_list() == [None, None, None]
+
+
 class FakeDataClient:
     def candles(self, instrument_id, bar_type, start, end, *, venue="OKX"):
         timestamps = pl.datetime_range(

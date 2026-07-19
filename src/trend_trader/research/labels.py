@@ -50,7 +50,7 @@ class ExecutionReturnLabeler:
         future_price = pl.col("open").shift(-horizon).over(_KEYS)
         observed_exit = pl.col("timestamp").shift(-horizon).over(_KEYS)
         expected_exit = pl.col("timestamp") + step * horizon
-        frame = candles.select(
+        expressions: list[pl.Expr | str] = [
             *_KEYS,
             "timestamp",
             pl.col("timestamp").alias("entry_time"),
@@ -58,7 +58,19 @@ class ExecutionReturnLabeler:
             expected_exit.alias("exit_time"),
             pl.col("open").cast(pl.Float64).alias("entry_price"),
             future_price.cast(pl.Float64).alias("exit_price"),
-        )
+        ]
+        if "volume" in candles.columns:
+            expressions.extend(
+                [
+                    pl.col("volume").cast(pl.Float64).alias("_entry_volume"),
+                    pl.col("volume")
+                    .shift(-horizon)
+                    .over(_KEYS)
+                    .cast(pl.Float64)
+                    .alias("_exit_volume"),
+                ]
+            )
+        frame = candles.select(*expressions)
         valid_prices = (
             pl.col("entry_price").is_not_null()
             & pl.col("exit_price").is_not_null()
@@ -68,15 +80,35 @@ class ExecutionReturnLabeler:
             & (pl.col("exit_price") > 0)
         )
         continuous = pl.col("_observed_exit_time") == pl.col("exit_time")
+        if "volume" in candles.columns:
+            valid_entry_liquidity = (
+                pl.col("_entry_volume").is_not_null()
+                & pl.col("_entry_volume").is_finite()
+                & (pl.col("_entry_volume") > 0)
+            )
+            valid_exit_liquidity = (
+                pl.col("_exit_volume").is_not_null()
+                & pl.col("_exit_volume").is_finite()
+                & (pl.col("_exit_volume") > 0)
+            )
+        else:
+            valid_entry_liquidity = pl.lit(True)
+            valid_exit_liquidity = pl.lit(True)
+        price_return_is_observable = valid_prices & continuous
         gross = pl.col("exit_price") / pl.col("entry_price") - 1
         net = gross - spec.round_trip_cost_bps / 10_000
-        valid = valid_prices & continuous
+        valid = (
+            valid_prices & continuous & valid_entry_liquidity & valid_exit_liquidity
+        )
         return (
             frame.with_columns(
                 pl.lit(spec.label_name).alias("label_name"),
                 pl.lit(horizon).cast(pl.Int32).alias("horizon_bars"),
                 pl.lit(spec.round_trip_cost_bps).alias("round_trip_cost_bps"),
-                pl.when(valid).then(gross).alias("gross_return"),
+                # Keep observable mark-to-market returns even when the endpoints
+                # cannot be traded. Research labels remain invalid, while a live
+                # portfolio can carry an existing position through the interval.
+                pl.when(price_return_is_observable).then(gross).alias("gross_return"),
                 pl.when(valid).then(net).alias("net_return"),
                 pl.when(valid).then(net).alias("label_value"),
                 valid.alias("label_is_valid"),
@@ -86,10 +118,14 @@ class ExecutionReturnLabeler:
                 .then(pl.lit("NON_CONTIGUOUS_HORIZON"))
                 .when(~valid_prices)
                 .then(pl.lit("INVALID_PRICE"))
+                .when(~valid_entry_liquidity)
+                .then(pl.lit("NON_TRADING_ENTRY"))
+                .when(~valid_exit_liquidity)
+                .then(pl.lit("NON_TRADING_EXIT"))
                 .otherwise(pl.lit(""))
                 .alias("label_quality_flags"),
             )
-            .drop("_observed_exit_time")
+            .drop("_observed_exit_time", "_entry_volume", "_exit_volume", strict=False)
             .select(
                 *_KEYS,
                 "timestamp",

@@ -27,6 +27,10 @@ class StrategyPortfolioConfig(StrictModel):
     short_threshold_bps: float | None = None
     signal_multiplier: Literal[-1.0, 1.0] = 1.0
     signal_smoothing_periods: int = 1
+    signal_standardization_periods: int | None = None
+    signal_standardization_min_periods: int | None = None
+    long_threshold_zscore: float | None = None
+    short_threshold_zscore: float | None = None
     long_trend_filter_bars: int | None = None
     long_trend_min_return_bps: float = 0.0
     position_size: float = 1.0
@@ -39,6 +43,20 @@ class StrategyPortfolioConfig(StrictModel):
             raise ValueError("portfolio signal thresholds must not be negative")
         if self.signal_smoothing_periods < 1:
             raise ValueError("signal_smoothing_periods must be at least 1")
+        if self.signal_standardization_periods is not None:
+            minimum = self.signal_standardization_min_periods
+            if self.signal_standardization_periods < 2:
+                raise ValueError("signal_standardization_periods must be at least 2")
+            if minimum is not None and not 2 <= minimum <= self.signal_standardization_periods:
+                raise ValueError("invalid signal_standardization_min_periods")
+            if self.long_threshold_zscore is None:
+                raise ValueError("standardized signals require long_threshold_zscore")
+        elif self.long_threshold_zscore is not None or self.short_threshold_zscore is not None:
+            raise ValueError("z-score thresholds require signal_standardization_periods")
+        if (self.long_threshold_zscore is not None and self.long_threshold_zscore < 0) or (
+            self.short_threshold_zscore is not None and self.short_threshold_zscore < 0
+        ):
+            raise ValueError("portfolio z-score thresholds must not be negative")
         if self.long_trend_filter_bars is not None and self.long_trend_filter_bars < 1:
             raise ValueError("long_trend_filter_bars must be at least 1")
         if not 0 < self.position_size <= 1:

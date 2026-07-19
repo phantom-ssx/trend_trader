@@ -26,6 +26,10 @@ def build_portfolio_returns(
     short_threshold_bps: float | None = None,
     signal_multiplier: Literal[-1.0, 1.0] = 1.0,
     signal_smoothing_periods: int = 1,
+    signal_standardization_periods: int | None = None,
+    signal_standardization_min_periods: int | None = None,
+    long_threshold_zscore: float | None = None,
+    short_threshold_zscore: float | None = None,
     long_trend_filter_bars: int | None = None,
     long_trend_min_return_bps: float = 0.0,
     position_size: float = 1.0,
@@ -46,6 +50,24 @@ def build_portfolio_returns(
         raise ValueError("portfolio signal thresholds must not be negative")
     if signal_smoothing_periods < 1:
         raise ValueError("signal_smoothing_periods must be at least 1")
+    if signal_standardization_periods is not None:
+        standardization_minimum = (
+            signal_standardization_min_periods or signal_standardization_periods
+        )
+        if signal_standardization_periods < 2 or not (
+            2 <= standardization_minimum <= signal_standardization_periods
+        ):
+            raise ValueError("invalid signal standardization window")
+        if long_threshold_zscore is None:
+            raise ValueError("standardized signals require long_threshold_zscore")
+    else:
+        standardization_minimum = None
+        if long_threshold_zscore is not None or short_threshold_zscore is not None:
+            raise ValueError("z-score thresholds require signal_standardization_periods")
+    if (long_threshold_zscore is not None and long_threshold_zscore < 0) or (
+        short_threshold_zscore is not None and short_threshold_zscore < 0
+    ):
+        raise ValueError("portfolio z-score thresholds must not be negative")
     if long_trend_filter_bars is not None and long_trend_filter_bars < 1:
         raise ValueError("long_trend_filter_bars must be at least 1")
     if not 0 < position_size <= 1:
@@ -62,9 +84,21 @@ def build_portfolio_returns(
     ]
     if long_trend_filter_bars is not None:
         selected_columns.append("entry_price")
+    frame = dataset.frame
+    if "label_is_valid" not in frame.columns:
+        frame = frame.with_columns(pl.lit(True).alias("label_is_valid"))
+    if mode == "time_series_threshold":
+        valid_observation = (
+            pl.col("factor_is_valid")
+            if "factor_is_valid" in frame.columns
+            else pl.col("value").is_not_null()
+        )
+    else:
+        valid_observation = pl.col("is_valid")
+    selected_columns.append("label_is_valid")
     selected = (
-        dataset.frame.filter(
-            pl.col("is_valid")
+        frame.filter(
+            valid_observation
             & (pl.col("factor_name") == factor_name)
             & pl.col("value").is_not_null()
             & pl.col("gross_return").is_not_null()
@@ -83,6 +117,10 @@ def build_portfolio_returns(
             short_threshold_bps=short_threshold_bps,
             signal_multiplier=signal_multiplier,
             signal_smoothing_periods=signal_smoothing_periods,
+            signal_standardization_periods=signal_standardization_periods,
+            signal_standardization_min_periods=standardization_minimum,
+            long_threshold_zscore=long_threshold_zscore,
+            short_threshold_zscore=short_threshold_zscore,
             long_trend_filter_bars=long_trend_filter_bars,
             long_trend_min_return_bps=long_trend_min_return_bps,
             position_size=position_size,
@@ -193,6 +231,10 @@ def _build_time_series_threshold_returns(
     short_threshold_bps: float | None,
     signal_multiplier: Literal[-1.0, 1.0],
     signal_smoothing_periods: int,
+    signal_standardization_periods: int | None,
+    signal_standardization_min_periods: int | None,
+    long_threshold_zscore: float | None,
+    short_threshold_zscore: float | None,
     long_trend_filter_bars: int | None,
     long_trend_min_return_bps: float,
     position_size: float,
@@ -202,8 +244,17 @@ def _build_time_series_threshold_returns(
         return _empty_portfolio(timestamp_dtype)
     if selected["instrument_id"].n_unique() != 1:
         raise ValueError("time_series_threshold portfolio requires exactly one instrument")
-    long_threshold = long_threshold_bps / 10_000
-    short_threshold = short_threshold_bps / 10_000 if short_threshold_bps is not None else None
+    standardized = signal_standardization_periods is not None
+    long_threshold = (
+        float(long_threshold_zscore) if standardized else long_threshold_bps / 10_000
+    )
+    short_threshold = (
+        float(short_threshold_zscore)
+        if standardized and short_threshold_zscore is not None
+        else short_threshold_bps / 10_000
+        if not standardized and short_threshold_bps is not None
+        else None
+    )
     cost_rate = round_trip_cost_bps / 10_000
     rows: list[dict[str, object]] = []
     for label_frame in selected.partition_by(["label_name", "horizon_bars"], maintain_order=True):
@@ -219,6 +270,9 @@ def _build_time_series_threshold_returns(
             )
         previous_position = 0.0
         recent_signals: deque[float] = deque(maxlen=signal_smoothing_periods)
+        standardization_values: deque[float] = deque()
+        standardization_sum = 0.0
+        standardization_sum_squares = 0.0
         for observation in label_frame.partition_by("timestamp", maintain_order=True):
             timestamp = observation["timestamp"][0]
             bar_index = int((timestamp - start) / step)
@@ -226,7 +280,33 @@ def _build_time_series_threshold_returns(
                 continue
             raw_signal = float(observation["value"][0])
             recent_signals.append(signal_multiplier * raw_signal)
-            signal = sum(recent_signals) / len(recent_signals)
+            smoothed_signal = sum(recent_signals) / len(recent_signals)
+            signal: float | None = smoothed_signal
+            signal_mean: float | None = None
+            signal_std: float | None = None
+            if signal_standardization_periods is not None:
+                if len(standardization_values) == signal_standardization_periods:
+                    removed = standardization_values.popleft()
+                    standardization_sum -= removed
+                    standardization_sum_squares -= removed * removed
+                standardization_values.append(smoothed_signal)
+                standardization_sum += smoothed_signal
+                standardization_sum_squares += smoothed_signal * smoothed_signal
+                observations = len(standardization_values)
+                if observations >= int(signal_standardization_min_periods or 0):
+                    signal_mean = standardization_sum / observations
+                    variance = (
+                        standardization_sum_squares
+                        - observations * signal_mean * signal_mean
+                    ) / (observations - 1)
+                    signal_std = math.sqrt(max(0.0, variance))
+                    signal = (
+                        (smoothed_signal - signal_mean) / signal_std
+                        if signal_std > 0
+                        else 0.0
+                    )
+                else:
+                    signal = None
             trend_return = (
                 observation["_long_trend_return"][0]
                 if long_trend_filter_bars is not None
@@ -236,9 +316,12 @@ def _build_time_series_threshold_returns(
                 trend_return is not None
                 and float(trend_return) > long_trend_min_return_bps / 10_000
             )
-            if signal > long_threshold and long_trend_allows_entry:
+            can_trade = bool(observation["label_is_valid"][0])
+            if not can_trade:
+                position = previous_position
+            elif signal is not None and signal > long_threshold and long_trend_allows_entry:
                 position = position_size
-            elif short_threshold is not None and signal < -short_threshold:
+            elif signal is not None and short_threshold is not None and signal < -short_threshold:
                 position = -position_size
             else:
                 position = 0.0
@@ -271,7 +354,10 @@ def _build_time_series_threshold_returns(
                     "portfolio_active_return": portfolio_active_return,
                     "turnover": turnover,
                     "raw_signal_value": raw_signal,
+                    "smoothed_signal_value": smoothed_signal,
                     "signal_value": signal,
+                    "signal_standardization_mean": signal_mean,
+                    "signal_standardization_std": signal_std,
                     "long_trend_return": trend_return,
                     "position": position,
                 }
@@ -518,6 +604,9 @@ def _empty_portfolio(timestamp_dtype: pl.DataType) -> pl.DataFrame:
             "benchmark_drawdown": pl.Float64,
             "signal_value": pl.Float64,
             "raw_signal_value": pl.Float64,
+            "smoothed_signal_value": pl.Float64,
+            "signal_standardization_mean": pl.Float64,
+            "signal_standardization_std": pl.Float64,
             "long_trend_return": pl.Float64,
             "position": pl.Float64,
         }

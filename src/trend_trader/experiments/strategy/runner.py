@@ -97,6 +97,14 @@ class StrategyExperimentRunner:
                 short_threshold_bps=config.portfolio.short_threshold_bps,
                 signal_multiplier=config.portfolio.signal_multiplier,
                 signal_smoothing_periods=config.portfolio.signal_smoothing_periods,
+                signal_standardization_periods=(
+                    config.portfolio.signal_standardization_periods
+                ),
+                signal_standardization_min_periods=(
+                    config.portfolio.signal_standardization_min_periods
+                ),
+                long_threshold_zscore=config.portfolio.long_threshold_zscore,
+                short_threshold_zscore=config.portfolio.short_threshold_zscore,
                 long_trend_filter_bars=config.portfolio.long_trend_filter_bars,
                 long_trend_min_return_bps=config.portfolio.long_trend_min_return_bps,
                 position_size=config.portfolio.position_size,
@@ -110,7 +118,8 @@ class StrategyExperimentRunner:
             primary = _strategy_primary_metrics(
                 analysis.ic_summary,
                 metrics,
-                horizon=config.primary_horizon,
+                signal_horizon=config.combination_training_horizon,
+                portfolio_horizon=config.primary_horizon,
                 signal_multiplier=config.portfolio.signal_multiplier,
             )
             component_versions = ",".join(item["version"] for item in prepared.factor_versions)
@@ -171,6 +180,8 @@ class StrategyExperimentRunner:
                 "cost": cost_model,
                 "portfolio": config.portfolio.model_dump(mode="json"),
                 "primary_horizon": config.primary_horizon,
+                "prediction_horizon": config.combination_training_horizon,
+                "execution_horizon": config.primary_horizon,
                 "primary_metrics": primary,
                 "metrics_by_horizon": metrics.to_dicts(),
                 "yearly_metrics": yearly_metrics.to_dicts(),
@@ -247,11 +258,12 @@ def _strategy_primary_metrics(
     ic_summary: pl.DataFrame,
     metrics: pl.DataFrame,
     *,
-    horizon: int,
+    signal_horizon: int,
+    portfolio_horizon: int,
     signal_multiplier: float = 1.0,
 ) -> dict[str, float | None]:
-    ic = ic_summary.filter(pl.col("horizon_bars") == horizon)
-    performance = metrics.filter(pl.col("horizon_bars") == horizon)
+    ic = ic_summary.filter(pl.col("horizon_bars") == signal_horizon)
+    performance = metrics.filter(pl.col("horizon_bars") == portfolio_horizon)
     raw_mean_ic = first_float(ic, "mean_ic")
     raw_ic_ir = first_float(ic, "icir")
     return {

@@ -259,6 +259,48 @@ def test_time_series_threshold_portfolio_smooths_using_only_available_signals() 
     assert result["position"].to_list() == [1.0, 1.0, 0.0, -1.0]
 
 
+def test_time_series_threshold_marks_positions_through_non_trading_bars() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    rows = [
+        {
+            "factor_name": "prediction",
+            "label_name": "future_return_1bars",
+            "horizon_bars": 1,
+            "timestamp": start + timedelta(hours=index),
+            "exit_time": start + timedelta(hours=index + 1),
+            "instrument_id": "BTC-USDT-SWAP",
+            "value": signal,
+            "gross_return": future_return,
+            "factor_is_valid": True,
+            "label_is_valid": can_trade,
+            "is_valid": can_trade,
+        }
+        for index, (signal, future_return, can_trade) in enumerate(
+            [
+                (0.003, 0.01, True),
+                (-0.003, 0.02, False),
+                (-0.003, -0.01, True),
+            ]
+        )
+    ]
+
+    result = build_portfolio_returns(
+        ResearchDataset(pl.DataFrame(rows, infer_schema_length=None)),
+        factor_name="prediction",
+        timeframe="1h",
+        start=start,
+        quantiles=5,
+        round_trip_cost_bps=16,
+        mode="time_series_threshold",
+        long_threshold_bps=20,
+        short_threshold_bps=20,
+    )
+
+    assert result["position"].to_list() == [1.0, 1.0, -1.0]
+    assert result["turnover"].to_list() == pytest.approx([0.5, 0.0, 1.0])
+    assert result["gross_portfolio_return"].to_list() == pytest.approx([0.01, 0.02, 0.01])
+
+
 def test_time_series_threshold_trend_filter_lags_entry_price() -> None:
     start = datetime(2024, 1, 1, tzinfo=UTC)
     entry_prices = [100.0, 110.0, 90.0, 95.0]
@@ -326,6 +368,42 @@ def test_time_series_threshold_scales_position_and_turnover() -> None:
     assert result["position"].to_list() == [0.5, 0.0]
     assert result["turnover"].to_list() == [0.25, 0.25]
     assert result["portfolio_return"].to_list() == pytest.approx([0.0096, -0.0004])
+
+
+def test_time_series_threshold_uses_causal_signal_zscore() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    rows = [
+        {
+            "factor_name": "prediction",
+            "label_name": "future_return_1bars",
+            "horizon_bars": 1,
+            "timestamp": start + timedelta(hours=index),
+            "exit_time": start + timedelta(hours=index + 1),
+            "instrument_id": "BTC-USDT-SWAP",
+            "value": signal,
+            "gross_return": 0.0,
+            "is_valid": True,
+        }
+        for index, signal in enumerate([1.0, 2.0, 3.0, 4.0])
+    ]
+
+    result = build_portfolio_returns(
+        ResearchDataset(pl.DataFrame(rows, infer_schema_length=None)),
+        factor_name="prediction",
+        timeframe="1h",
+        start=start,
+        quantiles=5,
+        round_trip_cost_bps=16,
+        mode="time_series_threshold",
+        signal_standardization_periods=3,
+        signal_standardization_min_periods=2,
+        long_threshold_zscore=0.5,
+    )
+
+    assert result["signal_value"].to_list() == pytest.approx(
+        [None, 2**-0.5, 1.0, 1.0]
+    )
+    assert result["position"].to_list() == [0.0, 1.0, 1.0, 1.0]
 
 
 def test_repository_allocates_unique_ids_and_saves_json(tmp_path: Path) -> None:
@@ -439,9 +517,10 @@ def test_strategy_runner_combines_factors_and_saves_performance(tmp_path: Path) 
             "combination": {
                 "method": "linear",
                 "name": "momentum_blend",
+                "training_horizon": 2,
                 "params": {"weights": {"mom_fast": 0.6, "mom_slow": 0.4}},
             },
-            "label": {"horizons": [1]},
+            "label": {"horizons": [1, 2]},
             "preprocess": {"normalize": "zscore"},
             "evaluation": {
                 "quantiles": 5,
@@ -464,6 +543,11 @@ def test_strategy_runner_combines_factors_and_saves_performance(tmp_path: Path) 
     assert result.summary["combination"]["method"] == "linear"
     assert result.summary["experiment_type"] == "strategy"
     assert len(result.summary["factors"]) == 2
+    assert result.summary["prediction_horizon"] == 2
+    assert result.summary["execution_horizon"] == 1
+    ic_summary = pl.read_csv(result.artifact_path / "signal_ic_summary.csv")
+    prediction_ic = ic_summary.filter(pl.col("horizon_bars") == 2)["mean_ic"][0]
+    assert result.summary["primary_metrics"]["signal_mean_ic"] == pytest.approx(prediction_ic)
     assert "annual_return" in result.summary["primary_metrics"]
     assert result.summary["cost"]["round_trip_bps"] == 16
     returns = pl.read_csv(result.artifact_path / "portfolio_returns.csv")
