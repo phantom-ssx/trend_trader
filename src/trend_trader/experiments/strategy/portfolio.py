@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -11,6 +12,67 @@ import polars as pl
 
 from trend_trader.data.models import bar_minutes
 from trend_trader.research import ResearchDataset
+
+
+def blend_portfolio_returns(
+    portfolios: Mapping[str, pl.DataFrame],
+    *,
+    weights: Mapping[str, float],
+    name: str = "strategy_ensemble",
+) -> pl.DataFrame:
+    """Blend independently executed strategy sleeves on their common timeline."""
+
+    if len(portfolios) < 2 or set(portfolios) != set(weights):
+        raise ValueError("portfolio sleeves and weights must contain the same two or more names")
+    if any(weight < 0 for weight in weights.values()) or not math.isclose(
+        sum(weights.values()), 1.0, abs_tol=1e-12
+    ):
+        raise ValueError("portfolio sleeve weights must be non-negative and sum to one")
+    keys = ["label_name", "horizon_bars", "timestamp", "exit_time"]
+    additive = [
+        "gross_long_return",
+        "gross_short_return",
+        "net_long_return",
+        "net_short_return",
+        "gross_portfolio_return",
+        "gross_active_return",
+        "transaction_cost",
+        "portfolio_return",
+        "portfolio_active_return",
+        "turnover",
+        "position",
+    ]
+    joined: pl.DataFrame | None = None
+    for sleeve, portfolio in portfolios.items():
+        missing = set(keys + additive + ["benchmark_return"]).difference(portfolio.columns)
+        if missing:
+            raise ValueError(f"portfolio sleeve {sleeve!r} is missing columns: {sorted(missing)}")
+        selected = portfolio.select(
+            *keys,
+            pl.col("benchmark_return").alias(f"benchmark_return__{sleeve}"),
+            *(pl.col(column).alias(f"{column}__{sleeve}") for column in additive),
+        )
+        joined = selected if joined is None else joined.join(selected, on=keys, how="inner")
+    assert joined is not None
+    if joined.is_empty():
+        raise ValueError("portfolio sleeves have no common observations")
+    first_sleeve = next(iter(portfolios))
+    expressions = []
+    for column in additive:
+        value = pl.lit(0.0)
+        for sleeve, weight in weights.items():
+            value += pl.col(f"{column}__{sleeve}") * weight
+        expressions.append(value.alias(column))
+    result = joined.select(
+        pl.lit(name).alias("factor_name"),
+        *keys,
+        *expressions,
+        pl.col(f"benchmark_return__{first_sleeve}").alias("benchmark_return"),
+    ).with_columns(
+        (pl.col("position") > 0).cast(pl.Int64).alias("long_count"),
+        (pl.col("position") < 0).cast(pl.Int64).alias("short_count"),
+    )
+    return _enrich_portfolio(result)
 
 
 def build_portfolio_returns(

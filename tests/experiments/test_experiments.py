@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from trend_trader.experiments import ExperimentConfig, ExperimentRunner, load_experiment_config
 from trend_trader.experiments.factor import FactorExperimentConfig, FactorExperimentRunner
 from trend_trader.experiments.portfolio import (
+    blend_portfolio_returns,
     build_portfolio_returns,
     portfolio_metrics,
     portfolio_monthly_metrics,
@@ -132,6 +133,49 @@ def test_portfolio_applies_costs_and_uses_initial_wealth_for_drawdown() -> None:
     assert result["portfolio_return"][1] == pytest.approx(-0.02)
     assert result["drawdown"][0] == pytest.approx(-0.0208)
     assert metrics["max_drawdown"][0] < -0.02
+
+
+def test_blend_portfolio_returns_keeps_sleeve_execution_costs() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+
+    def sleeve(name: str, returns: list[float], costs: list[float]) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "factor_name": [name] * 2,
+                "label_name": ["future_return_1bars"] * 2,
+                "horizon_bars": [1, 1],
+                "timestamp": [start, start + timedelta(hours=1)],
+                "exit_time": [start + timedelta(hours=1), start + timedelta(hours=2)],
+                "gross_long_return": returns,
+                "gross_short_return": [0.0, 0.0],
+                "net_long_return": [r - c for r, c in zip(returns, costs, strict=True)],
+                "net_short_return": [0.0, 0.0],
+                "gross_portfolio_return": returns,
+                "benchmark_return": [0.01, 0.01],
+                "gross_active_return": [r - 0.01 for r in returns],
+                "transaction_cost": costs,
+                "portfolio_return": [r - c for r, c in zip(returns, costs, strict=True)],
+                "portfolio_active_return": [
+                    r - 0.01 - c for r, c in zip(returns, costs, strict=True)
+                ],
+                "turnover": [0.5, 0.5],
+                "position": [1.0, 0.0],
+            }
+        )
+
+    result = blend_portfolio_returns(
+        {
+            "slow": sleeve("slow", [0.02, 0.00], [0.001, 0.001]),
+            "fast": sleeve("fast", [-0.01, 0.03], [0.002, 0.002]),
+        },
+        weights={"slow": 0.5, "fast": 0.5},
+        name="balanced",
+    )
+
+    assert result["portfolio_return"].to_list() == pytest.approx([0.0035, 0.0135])
+    assert result["transaction_cost"].to_list() == pytest.approx([0.0015, 0.0015])
+    assert result["position"].to_list() == [1.0, 0.0]
+    assert result["wealth"][-1] == pytest.approx(1.0035 * 1.0135)
 
 
 def test_portfolio_supports_long_only_with_actual_weight_turnover() -> None:
