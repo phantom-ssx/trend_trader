@@ -260,6 +260,8 @@ def main() -> None:
         ),
         "selected": selected,
         "recommended_fixed_candidate": robust_name,
+        "recommendation_uses_post_2025_as_acceptance_gate": True,
+        "recommendation_does_not_rank_candidates_on_may_june_2026": True,
         "recommendation_reason": (
             "the development-selected dynamic overlay improves stability but misses the "
             "existing 100% post-2025 annual-return gate; the fixed candidate improves "

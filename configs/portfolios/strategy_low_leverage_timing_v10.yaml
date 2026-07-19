@@ -32,8 +32,8 @@ selection_protocol:
   development_end: "2025-01-01T00:00:00Z"
   primary_objective: improve_complete_development_half_year_stability
   may_june_2026_are_not_selection_periods: true
-  post_2025_metrics_are_diagnostic_only: true
-  retain_post_2025_annual_return_gate: 1.00
+  post_2025_metrics_are_not_used_for_grid_ranking: true
+  post_2025_acceptance_gate_annual_return: 1.00
 
 promotion_rules:
   minimum_forward_days: 180
