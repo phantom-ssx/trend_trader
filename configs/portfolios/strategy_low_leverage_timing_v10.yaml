@@ -1,0 +1,44 @@
+portfolio:
+  name: strategy_low_leverage_timing_v10
+  status: forward_shadow_only
+  created_at: "2026-07-19T00:00:00Z"
+  historical_results_are_contaminated: true
+  forward_start: "2026-07-19T00:00:00Z"
+  forbid_parameter_changes_during_forward_test: true
+  target_leverage: 2.25
+  fee_bps_per_side: 5
+  slippage_bps_per_side: 3
+
+weights:
+  eth_1m_monthly_ensemble: 0.55
+  btc_72h_ridge: 0.00
+  eth_168h_contrarian_ridge: 0.20
+  eth_24h_contrarian_long_only: 0.25
+
+timing_research:
+  rolling_hour_execution: rejected_for_horizon_mismatch_and_overtrading
+  staggered_phase_execution: rejected_for_lower_return_and_higher_drawdown
+  rebound_entry_filter: rejected_by_development_phase_robustness
+  fixed_stop_exit: rejected_by_development_return_and_drawdown_gates
+  hourly_trend_sleeve: rejected_by_development_and_oos_stability
+
+risk_rationale:
+  btc_72h_ridge: remains_removed_after_zero_of_three_positive_daily_phases
+  eth_168h_contrarian_ridge: raised_only_to_twenty_percent_phase_risk_cap
+  eth_24h_contrarian_long_only: reduced_to_twenty_five_percent_for_loss_concentration
+  eth_1m_monthly_ensemble: receives_remainder_for_lower_drawdown_and_low_correlation
+
+selection_protocol:
+  development_end: "2025-01-01T00:00:00Z"
+  primary_objective: improve_complete_development_half_year_stability
+  may_june_2026_are_not_selection_periods: true
+  post_2025_metrics_are_diagnostic_only: true
+  retain_post_2025_annual_return_gate: 1.00
+
+promotion_rules:
+  minimum_forward_days: 180
+  require_complete_funding_history: true
+  maximum_forward_drawdown: 0.18
+  minimum_forward_sharpe: 1.25
+  minimum_positive_month_rate: 0.60
+  annual_return_is_not_the_only_selection_criterion: true
