@@ -72,15 +72,24 @@ def test_factor_and_strategy_configs_are_strictly_separated() -> None:
                 "cost": {"fee_bps": 5},
             }
         )
-    with pytest.raises(ValidationError, match="at least two factors"):
+    with pytest.raises(ValidationError, match="at least one factor"):
         StrategyExperimentConfig.model_validate(
             {
                 "experiment": {"name": "invalid_strategy"},
                 "data": {"start": "2024-01-01", "end": "2024-02-01"},
-                "factors": [{"name": "momentum"}],
+                "factors": [],
                 "combination": {"method": "linear"},
             }
         )
+    valid_single_factor = StrategyExperimentConfig.model_validate(
+        {
+            "experiment": {"name": "single_factor_strategy"},
+            "data": {"start": "2024-01-01", "end": "2024-02-01"},
+            "factors": [{"name": "momentum"}],
+            "combination": {"method": "linear"},
+        }
+    )
+    assert len(valid_single_factor.factors) == 1
 
 
 def test_portfolio_applies_costs_and_uses_initial_wealth_for_drawdown() -> None:
@@ -389,6 +398,42 @@ def test_time_series_threshold_scales_position_and_turnover() -> None:
     assert result["position"].to_list() == [0.5, 0.0]
     assert result["turnover"].to_list() == [0.25, 0.25]
     assert result["portfolio_return"].to_list() == pytest.approx([0.0096, -0.0004])
+
+
+def test_time_series_threshold_can_hold_an_event_for_fixed_period() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    signals = [0.0, 2.0, 0.0, 2.0, 0.0, 0.0, 2.0, 0.0]
+    rows = [
+        {
+            "factor_name": "event",
+            "label_name": "future_return_1bars",
+            "horizon_bars": 1,
+            "timestamp": start + timedelta(hours=index),
+            "exit_time": start + timedelta(hours=index + 1),
+            "instrument_id": "ETH-USDT-SWAP",
+            "value": signal,
+            "gross_return": 0.01,
+            "is_valid": True,
+        }
+        for index, signal in enumerate(signals)
+    ]
+
+    result = build_portfolio_returns(
+        ResearchDataset(pl.DataFrame(rows, infer_schema_length=None)),
+        factor_name="event",
+        timeframe="1h",
+        start=start,
+        quantiles=5,
+        round_trip_cost_bps=16,
+        mode="time_series_threshold",
+        long_threshold_value=1.5,
+        fixed_holding_periods=3,
+    )
+
+    assert result["position"].to_list() == [0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0]
+    assert result["turnover"].to_list() == pytest.approx(
+        [0.0, 0.5, 0.0, 0.0, 0.5, 0.0, 0.5, 0.0]
+    )
 
 
 def test_time_series_threshold_uses_causal_signal_zscore() -> None:

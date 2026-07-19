@@ -89,9 +89,30 @@ class VolumePriceDivergenceFactor(Factor):
         return inputs[DataType.CANDLES].select("timestamp", divergence.alias("raw_value"))
 
 
+class RelativeVolumeFactor(Factor):
+    """Current quote volume relative to its causal trailing average."""
+
+    name = "relative_volume"
+
+    def required_history_bars(self, spec: FactorSpec, bar_type: str) -> int:
+        return positive_int(spec.params, "period", 60)
+
+    def compute(
+        self, inputs: Mapping[DataType, pl.DataFrame], spec: FactorSpec, bar_type: str
+    ) -> pl.DataFrame:
+        period = positive_int(spec.params, "period", 60)
+        volume = pl.col(str(spec.params.get("column", "volume_quote")))
+        trailing_mean = volume.rolling_mean(period, min_samples=period)
+        return inputs[DataType.CANDLES].select(
+            "timestamp",
+            pl.when(trailing_mean > 0).then(volume / trailing_mean).alias("raw_value"),
+        )
+
+
 LIQUIDITY_FACTORS = (
     VolumeChangeFactor(),
     TurnoverFactor(),
     AmihudFactor(),
     VolumePriceDivergenceFactor(),
+    RelativeVolumeFactor(),
 )

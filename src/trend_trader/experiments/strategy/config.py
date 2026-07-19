@@ -25,6 +25,8 @@ class StrategyPortfolioConfig(StrictModel):
     mode: Literal["long_short", "long_only", "short_only", "time_series_threshold"] = "long_short"
     long_threshold_bps: float = 0.0
     short_threshold_bps: float | None = None
+    long_threshold_value: float | None = None
+    short_threshold_value: float | None = None
     signal_multiplier: Literal[-1.0, 1.0] = 1.0
     signal_smoothing_periods: int = 1
     signal_standardization_periods: int | None = None
@@ -34,6 +36,7 @@ class StrategyPortfolioConfig(StrictModel):
     long_trend_filter_bars: int | None = None
     long_trend_min_return_bps: float = 0.0
     position_size: float = 1.0
+    fixed_holding_periods: int | None = None
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> StrategyPortfolioConfig:
@@ -41,6 +44,10 @@ class StrategyPortfolioConfig(StrictModel):
             self.short_threshold_bps is not None and self.short_threshold_bps < 0
         ):
             raise ValueError("portfolio signal thresholds must not be negative")
+        if (self.long_threshold_value is not None and self.long_threshold_value < 0) or (
+            self.short_threshold_value is not None and self.short_threshold_value < 0
+        ):
+            raise ValueError("portfolio raw signal thresholds must not be negative")
         if self.signal_smoothing_periods < 1:
             raise ValueError("signal_smoothing_periods must be at least 1")
         if self.signal_standardization_periods is not None:
@@ -61,6 +68,8 @@ class StrategyPortfolioConfig(StrictModel):
             raise ValueError("long_trend_filter_bars must be at least 1")
         if not 0 < self.position_size <= 1:
             raise ValueError("position_size must be in (0, 1]")
+        if self.fixed_holding_periods is not None and self.fixed_holding_periods < 1:
+            raise ValueError("fixed_holding_periods must be at least 1")
         return self
 
 
@@ -77,8 +86,8 @@ class StrategyExperimentConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_strategy(self) -> StrategyExperimentConfig:
-        if len(self.factors) < 2:
-            raise ValueError("strategy experiment requires at least two factors")
+        if not self.factors:
+            raise ValueError("strategy experiment requires at least one factor")
         references = [item.reference for item in self.factors]
         if len(references) != len(set(references)):
             raise ValueError("factor aliases must be unique")
@@ -93,6 +102,11 @@ class StrategyExperimentConfig(StrictModel):
             and self.evaluation.scope != "time_series"
         ):
             raise ValueError("time_series_threshold portfolio requires time_series evaluation")
+        if (
+            self.portfolio.fixed_holding_periods is not None
+            and self.portfolio.mode != "time_series_threshold"
+        ):
+            raise ValueError("fixed_holding_periods requires time_series_threshold portfolio")
         return self
 
     @property

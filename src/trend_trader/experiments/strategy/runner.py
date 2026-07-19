@@ -98,6 +98,8 @@ class StrategyExperimentRunner:
                 mode=config.portfolio.mode,
                 long_threshold_bps=config.portfolio.long_threshold_bps,
                 short_threshold_bps=config.portfolio.short_threshold_bps,
+                long_threshold_value=config.portfolio.long_threshold_value,
+                short_threshold_value=config.portfolio.short_threshold_value,
                 signal_multiplier=config.portfolio.signal_multiplier,
                 signal_smoothing_periods=config.portfolio.signal_smoothing_periods,
                 signal_standardization_periods=(
@@ -111,6 +113,7 @@ class StrategyExperimentRunner:
                 long_trend_filter_bars=config.portfolio.long_trend_filter_bars,
                 long_trend_min_return_bps=config.portfolio.long_trend_min_return_bps,
                 position_size=config.portfolio.position_size,
+                fixed_holding_periods=config.portfolio.fixed_holding_periods,
             )
             metrics = portfolio_metrics(returns, timeframe=config.data.timeframe)
             yearly_metrics = portfolio_yearly_metrics(

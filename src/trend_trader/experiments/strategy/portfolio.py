@@ -24,6 +24,8 @@ def build_portfolio_returns(
     mode: Literal["long_short", "long_only", "short_only", "time_series_threshold"] = "long_short",
     long_threshold_bps: float = 0.0,
     short_threshold_bps: float | None = None,
+    long_threshold_value: float | None = None,
+    short_threshold_value: float | None = None,
     signal_multiplier: Literal[-1.0, 1.0] = 1.0,
     signal_smoothing_periods: int = 1,
     signal_standardization_periods: int | None = None,
@@ -33,6 +35,7 @@ def build_portfolio_returns(
     long_trend_filter_bars: int | None = None,
     long_trend_min_return_bps: float = 0.0,
     position_size: float = 1.0,
+    fixed_holding_periods: int | None = None,
 ) -> pl.DataFrame:
     """Build equal-weight, non-overlapping portfolios from signal tails.
 
@@ -48,6 +51,10 @@ def build_portfolio_returns(
         raise ValueError(f"unsupported portfolio mode: {mode}")
     if long_threshold_bps < 0 or (short_threshold_bps is not None and short_threshold_bps < 0):
         raise ValueError("portfolio signal thresholds must not be negative")
+    if (long_threshold_value is not None and long_threshold_value < 0) or (
+        short_threshold_value is not None and short_threshold_value < 0
+    ):
+        raise ValueError("portfolio raw signal thresholds must not be negative")
     if signal_smoothing_periods < 1:
         raise ValueError("signal_smoothing_periods must be at least 1")
     if signal_standardization_periods is not None:
@@ -72,6 +79,8 @@ def build_portfolio_returns(
         raise ValueError("long_trend_filter_bars must be at least 1")
     if not 0 < position_size <= 1:
         raise ValueError("position_size must be in (0, 1]")
+    if fixed_holding_periods is not None and fixed_holding_periods < 1:
+        raise ValueError("fixed_holding_periods must be at least 1")
     step = timedelta(minutes=bar_minutes(timeframe))
     selected_columns = [
         "label_name",
@@ -115,6 +124,8 @@ def build_portfolio_returns(
             round_trip_cost_bps=round_trip_cost_bps,
             long_threshold_bps=long_threshold_bps,
             short_threshold_bps=short_threshold_bps,
+            long_threshold_value=long_threshold_value,
+            short_threshold_value=short_threshold_value,
             signal_multiplier=signal_multiplier,
             signal_smoothing_periods=signal_smoothing_periods,
             signal_standardization_periods=signal_standardization_periods,
@@ -124,6 +135,7 @@ def build_portfolio_returns(
             long_trend_filter_bars=long_trend_filter_bars,
             long_trend_min_return_bps=long_trend_min_return_bps,
             position_size=position_size,
+            fixed_holding_periods=fixed_holding_periods,
             timestamp_dtype=dataset.frame.schema["timestamp"],
         )
     rows: list[dict[str, object]] = []
@@ -229,6 +241,8 @@ def _build_time_series_threshold_returns(
     round_trip_cost_bps: float,
     long_threshold_bps: float,
     short_threshold_bps: float | None,
+    long_threshold_value: float | None,
+    short_threshold_value: float | None,
     signal_multiplier: Literal[-1.0, 1.0],
     signal_smoothing_periods: int,
     signal_standardization_periods: int | None,
@@ -238,6 +252,7 @@ def _build_time_series_threshold_returns(
     long_trend_filter_bars: int | None,
     long_trend_min_return_bps: float,
     position_size: float,
+    fixed_holding_periods: int | None,
     timestamp_dtype: pl.DataType,
 ) -> pl.DataFrame:
     if selected.is_empty():
@@ -246,11 +261,17 @@ def _build_time_series_threshold_returns(
         raise ValueError("time_series_threshold portfolio requires exactly one instrument")
     standardized = signal_standardization_periods is not None
     long_threshold = (
-        float(long_threshold_zscore) if standardized else long_threshold_bps / 10_000
+        float(long_threshold_zscore)
+        if standardized
+        else long_threshold_value
+        if long_threshold_value is not None
+        else long_threshold_bps / 10_000
     )
     short_threshold = (
         float(short_threshold_zscore)
         if standardized and short_threshold_zscore is not None
+        else short_threshold_value
+        if not standardized and short_threshold_value is not None
         else short_threshold_bps / 10_000
         if not standardized and short_threshold_bps is not None
         else None
@@ -269,6 +290,7 @@ def _build_time_series_threshold_returns(
                 ).alias("_long_trend_return")
             )
         previous_position = 0.0
+        remaining_holding_periods = 0
         recent_signals: deque[float] = deque(maxlen=signal_smoothing_periods)
         standardization_values: deque[float] = deque()
         standardization_sum = 0.0
@@ -319,10 +341,20 @@ def _build_time_series_threshold_returns(
             can_trade = bool(observation["label_is_valid"][0])
             if not can_trade:
                 position = previous_position
+            elif fixed_holding_periods is not None and previous_position != 0:
+                if remaining_holding_periods > 0:
+                    position = previous_position
+                    remaining_holding_periods -= 1
+                else:
+                    position = 0.0
             elif signal is not None and signal > long_threshold and long_trend_allows_entry:
                 position = position_size
+                if fixed_holding_periods is not None:
+                    remaining_holding_periods = fixed_holding_periods - 1
             elif signal is not None and short_threshold is not None and signal < -short_threshold:
                 position = -position_size
+                if fixed_holding_periods is not None:
+                    remaining_holding_periods = fixed_holding_periods - 1
             else:
                 position = 0.0
             turnover = 0.5 * abs(position - previous_position)

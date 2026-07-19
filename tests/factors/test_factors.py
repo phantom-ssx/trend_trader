@@ -62,6 +62,7 @@ def test_registry_contains_all_initial_factors() -> None:
         "momentum",
         "open_interest",
         "quarter_hour_volume_pressure",
+        "relative_volume",
         "realized_kurtosis",
         "realized_skewness",
         "taker_imbalance",
@@ -70,6 +71,7 @@ def test_registry_contains_all_initial_factors() -> None:
         "up_down_volatility_asymmetry",
         "volatility_change",
         "volume_change",
+        "volume_confirmed_reversal_event",
         "volume_price_divergence",
     }
 
@@ -188,6 +190,52 @@ def test_quarter_hour_volume_pressure_is_causal_and_boundary_specific() -> None:
     assert result["raw_value"][59] == 0.0
     assert result["raw_value"][60] == pytest.approx(0.5)
     assert result["raw_value"][61] == 0.0
+
+
+def test_relative_volume_uses_current_and_trailing_quote_volume() -> None:
+    candles = candle_frame(5).with_columns(
+        pl.Series("volume_quote", [10.0, 10.0, 10.0, 10.0, 30.0])
+    )
+
+    result = default_registry.get("relative_volume").compute(
+        {DataType.CANDLES: candles},
+        FactorSpec("relative_volume", {"period": 3}),
+        "1h",
+    )
+
+    assert result["raw_value"][:2].to_list() == [None, None]
+    assert result["raw_value"][2] == 1.0
+    assert result["raw_value"][4] == pytest.approx(1.8)
+
+
+def test_volume_confirmed_reversal_emits_only_first_high_volume_crossing() -> None:
+    closes = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 80.0, 79.0, 78.0]
+    candles = candle_frame(len(closes)).with_columns(
+        pl.Series("close", closes),
+        pl.Series("volume_quote", [10.0] * 7 + [40.0, 40.0, 40.0]),
+    )
+
+    result = default_registry.get("volume_confirmed_reversal_event").compute(
+        {DataType.CANDLES: candles},
+        FactorSpec(
+            "volume_confirmed_reversal_event",
+            {
+                "momentum_lookback": 1,
+                "normalization_window": 5,
+                "normalization_min_periods": 5,
+                "smoothing_period": 1,
+                "volume_period": 3,
+                "signal_threshold": 1.5,
+                "minimum_relative_volume": 1.5,
+            },
+        ),
+        "1h",
+    )
+
+    events = result.filter(pl.col("raw_value") > 0)
+    assert events.height == 1
+    assert events["timestamp"][0] == candles["timestamp"][7]
+    assert events["raw_value"][0] > 1.5
 
 
 def test_cross_sectional_standardization_marks_small_sections_invalid() -> None:
