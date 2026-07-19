@@ -1,0 +1,288 @@
+<div id="portfolio-trade-chart" class="portfolio-trade-vis">
+  <div class="viz-grid portfolio-summary" aria-label="策略区间汇总">
+    <div class="card viz-stat">
+      <div class="text-muted">区间收益</div>
+      <div class="viz-stat-value" data-stat="return">—</div>
+      <div class="text-small text-muted" data-stat="costs"></div>
+    </div>
+    <div class="card viz-stat">
+      <div class="text-muted">最大回撤</div>
+      <div class="viz-stat-value" data-stat="drawdown">—</div>
+      <div class="text-small text-muted">日频盯市</div>
+    </div>
+    <div class="card viz-stat">
+      <div class="text-muted">仓位变化</div>
+      <div class="viz-stat-value" data-stat="changes">—</div>
+      <div class="text-small text-muted" data-stat="counts"></div>
+    </div>
+  </div>
+
+  <div class="viz-controls" data-control="sleeves" aria-label="交易标记筛选"></div>
+  <div class="viz-controls" aria-label="图表时间范围">
+    <button class="btn" type="button" data-range="30">最近30天</button>
+    <button class="btn" type="button" data-range="90">最近90天</button>
+    <button class="btn" type="button" data-range="all" aria-pressed="true">全部</button>
+  </div>
+
+  <section class="portfolio-section" aria-labelledby="portfolio-price-heading">
+    <div class="portfolio-heading">
+      <span id="portfolio-price-heading">ETH-USDT-SWAP K线与交易</span>
+      <span class="text-small text-muted" data-label="period"></span>
+    </div>
+    <svg data-chart="price" class="portfolio-price-chart" role="img" aria-labelledby="price-title price-desc">
+      <title id="price-title">ETH价格K线和v8r交易标记</title>
+      <desc id="price-desc">四小时K线。向上三角表示做多，向下三角表示做空，圆点表示退出。</desc>
+    </svg>
+    <div class="text-small text-muted" data-label="selection">▲ 做多 · ▼ 做空 · ● 退出</div>
+  </section>
+
+  <section class="portfolio-section" aria-labelledby="portfolio-equity-heading">
+    <div class="portfolio-heading">
+      <span id="portfolio-equity-heading">组合累计收益与回撤</span>
+      <span class="text-small text-muted">日频，%</span>
+    </div>
+    <svg data-chart="equity" class="portfolio-equity-chart" role="img" aria-labelledby="equity-title equity-desc">
+      <title id="equity-title">v8r累计收益与最大回撤</title>
+      <desc id="equity-desc">实线是累计收益，阴影区域是回撤。</desc>
+    </svg>
+  </section>
+
+  <div class="table-responsive portfolio-monthly">
+    <table class="table table-sm" aria-label="逐月收益">
+      <thead><tr data-table="months"></tr></thead>
+      <tbody><tr data-table="returns"></tr></tbody>
+    </table>
+  </div>
+  <div class="text-destructive" data-error hidden></div>
+</div>
+
+<style>
+  #portfolio-trade-chart { color: var(--foreground); }
+  #portfolio-trade-chart .portfolio-summary { margin-bottom: 12px; }
+  #portfolio-trade-chart .viz-controls { margin: 9px 0; }
+  #portfolio-trade-chart .portfolio-section { margin-top: 15px; }
+  #portfolio-trade-chart .portfolio-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 5px; font-weight: 500; }
+  #portfolio-trade-chart .portfolio-price-chart { display: block; width: 100%; height: 430px; overflow: visible; }
+  #portfolio-trade-chart .portfolio-equity-chart { display: block; width: 100%; height: 250px; overflow: visible; }
+  #portfolio-trade-chart .portfolio-monthly { margin-top: 12px; }
+  #portfolio-trade-chart .monthly-positive { color: var(--viz-series-1); }
+  #portfolio-trade-chart .monthly-negative { color: var(--destructive); }
+  #portfolio-trade-chart .chart-grid { stroke: var(--border); stroke-width: 1; }
+  #portfolio-trade-chart .chart-axis { fill: var(--muted-foreground); font-size: 11px; }
+  #portfolio-trade-chart .equity-line { fill: none; stroke: var(--viz-series-1); stroke-width: 2; vector-effect: non-scaling-stroke; }
+  #portfolio-trade-chart .drawdown-area { fill: color-mix(in srgb, var(--destructive) 18%, transparent); stroke: var(--destructive); stroke-width: 1; vector-effect: non-scaling-stroke; }
+  #portfolio-trade-chart .marker { cursor: pointer; stroke: var(--background); stroke-width: 1; vector-effect: non-scaling-stroke; }
+  @media (max-width: 520px) {
+    #portfolio-trade-chart .portfolio-heading { align-items: flex-start; flex-direction: column; gap: 2px; }
+    #portfolio-trade-chart .portfolio-price-chart { height: 340px; }
+    #portfolio-trade-chart .portfolio-equity-chart { height: 220px; }
+  }
+</style>
+
+<script>
+(() => {
+  const root = document.getElementById('portfolio-trade-chart');
+  const DATA = __STRATEGY_DATA__;
+  const NS = 'http://www.w3.org/2000/svg';
+  const priceSvg = root.querySelector('[data-chart="price"]');
+  const equitySvg = root.querySelector('[data-chart="equity"]');
+  const errorBox = root.querySelector('[data-error]');
+  const sleeveColors = {
+    eth_1m: 'var(--viz-series-2)',
+    eth_24h: 'var(--viz-series-3)',
+    eth_168h: 'var(--viz-series-4)',
+    btc_72h: 'var(--viz-series-5)'
+  };
+  const sleeveLabels = { eth_1m: 'ETH 1m', eth_24h: 'ETH 24h', eth_168h: 'ETH 168h', btc_72h: 'BTC 72h' };
+  let rangeDays = null;
+  const enabledSleeves = new Set();
+
+  const fail = message => {
+    errorBox.hidden = false;
+    errorBox.textContent = message;
+  };
+  if (!DATA || !Array.isArray(DATA.candles) || !DATA.candles.length || !Array.isArray(DATA.equity) || !DATA.equity.length) {
+    fail('内嵌数据为空，无法绘图。');
+    return;
+  }
+
+  const svgNode = (name, attrs = {}) => {
+    const node = document.createElementNS(NS, name);
+    Object.entries(attrs).forEach(([key, value]) => node.setAttribute(key, String(value)));
+    return node;
+  };
+  const clear = svg => {
+    Array.from(svg.children).forEach(child => {
+      if (child.tagName !== 'title' && child.tagName !== 'desc') child.remove();
+    });
+  };
+  const formatDate = seconds => new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', timeZone: 'UTC' }).format(new Date(seconds * 1000));
+  const formatPrice = value => value >= 1000 ? value.toLocaleString('en-US', { maximumFractionDigits: 0 }) : value.toFixed(2);
+  const visibleFrom = lastTime => rangeDays ? lastTime - rangeDays * 86400 : -Infinity;
+
+  root.querySelector('[data-stat="return"]').textContent = `${DATA.stats.return >= 0 ? '+' : ''}${DATA.stats.return.toFixed(2)}%`;
+  root.querySelector('[data-stat="drawdown"]').textContent = `${DATA.stats.maxDrawdown.toFixed(2)}%`;
+  root.querySelector('[data-stat="changes"]').textContent = DATA.stats.positionChanges.toLocaleString();
+  root.querySelector('[data-stat="costs"]').textContent = `${DATA.stats.leverage.toFixed(2)}× · 手续费 ${DATA.stats.feeBps}bp + 滑点 ${DATA.stats.slippageBps}bp / 单边`;
+  root.querySelector('[data-stat="counts"]').textContent = `${DATA.candles.length} 根K线 · ${DATA.stats.displayedMarkers} 个可视标记`;
+  root.querySelector('[data-label="period"]').textContent = `${DATA.period.start} — ${DATA.period.end} · ${DATA.candleTimeframe}`;
+
+  const activeSleeves = Object.entries(DATA.stats.weights).filter(([, weight]) => weight > 0);
+  const controls = root.querySelector('[data-control="sleeves"]');
+  activeSleeves.forEach(([key, weight]) => {
+    enabledSleeves.add(key);
+    const label = document.createElement('label');
+    label.className = 'form-check';
+    const input = document.createElement('input');
+    input.className = 'form-check-input';
+    input.type = 'checkbox';
+    input.checked = true;
+    input.dataset.sleeve = key;
+    input.addEventListener('change', () => {
+      if (input.checked) enabledSleeves.add(key); else enabledSleeves.delete(key);
+      renderPrice();
+    });
+    const text = document.createElement('span');
+    text.className = 'form-check-label';
+    text.textContent = `${sleeveLabels[key] || key} · ${(weight * 100).toFixed(0)}%`;
+    label.append(input, text);
+    controls.appendChild(label);
+  });
+
+  const chartSize = (svg, fallbackHeight) => ({
+    width: Math.max(320, Math.round(svg.getBoundingClientRect().width || 1100)),
+    height: Math.max(180, Math.round(svg.getBoundingClientRect().height || fallbackHeight))
+  });
+  const addGrid = (svg, box, minValue, maxValue, formatter) => {
+    for (let index = 0; index <= 5; index += 1) {
+      const ratio = index / 5;
+      const y = box.top + ratio * box.height;
+      svg.appendChild(svgNode('line', { x1: box.left, y1: y, x2: box.left + box.width, y2: y, class: 'chart-grid' }));
+      const label = svgNode('text', { x: box.left - 7, y: y + 4, 'text-anchor': 'end', class: 'chart-axis' });
+      label.textContent = formatter(maxValue - ratio * (maxValue - minValue));
+      svg.appendChild(label);
+    }
+  };
+  const addTimeLabels = (svg, data, box, x) => {
+    const tickCount = Math.min(6, data.length);
+    for (let index = 0; index < tickCount; index += 1) {
+      const item = data[Math.round(index * (data.length - 1) / Math.max(1, tickCount - 1))];
+      const label = svgNode('text', { x: x(item.time), y: box.top + box.height + 20, 'text-anchor': index === 0 ? 'start' : index === tickCount - 1 ? 'end' : 'middle', class: 'chart-axis' });
+      label.textContent = formatDate(item.time);
+      svg.appendChild(label);
+    }
+  };
+
+  function renderPrice() {
+    clear(priceSvg);
+    const size = chartSize(priceSvg, 430);
+    priceSvg.setAttribute('viewBox', `0 0 ${size.width} ${size.height}`);
+    const box = { left: 67, top: 12, width: size.width - 85, height: size.height - 43 };
+    const lastTime = DATA.candles[DATA.candles.length - 1].time;
+    const cutoff = visibleFrom(lastTime);
+    const candles = DATA.candles.filter(item => item.time >= cutoff);
+    const minimum = Math.min(...candles.map(item => item.low));
+    const maximum = Math.max(...candles.map(item => item.high));
+    const padding = Math.max((maximum - minimum) * 0.04, maximum * 0.001);
+    const low = minimum - padding;
+    const high = maximum + padding;
+    const timeSpan = Math.max(1, candles[candles.length - 1].time - candles[0].time);
+    const x = time => box.left + (time - candles[0].time) / timeSpan * box.width;
+    const y = value => box.top + (high - value) / (high - low) * box.height;
+    addGrid(priceSvg, box, low, high, formatPrice);
+    addTimeLabels(priceSvg, candles, box, x);
+    const candleWidth = Math.max(1, Math.min(8, box.width / candles.length * 0.72));
+    candles.forEach(item => {
+      const rising = item.close >= item.open;
+      const color = rising ? 'var(--viz-series-1)' : 'var(--destructive)';
+      const center = x(item.time);
+      priceSvg.appendChild(svgNode('line', { x1: center, y1: y(item.high), x2: center, y2: y(item.low), stroke: color, 'stroke-width': 1 }));
+      const top = Math.min(y(item.open), y(item.close));
+      const bodyHeight = Math.max(1, Math.abs(y(item.open) - y(item.close)));
+      priceSvg.appendChild(svgNode('rect', { x: center - candleWidth / 2, y: top, width: candleWidth, height: bodyHeight, fill: color }));
+    });
+    const candleByTime = new Map(candles.map(item => [item.time, item]));
+    DATA.markers.filter(item => item.time >= cutoff && enabledSleeves.has(item.sleeve)).forEach((item, index) => {
+      const candle = candleByTime.get(item.time);
+      if (!candle) return;
+      const center = x(item.time);
+      const laneOffset = (index % 3) * 7;
+      let marker;
+      if (item.action === 'long') {
+        const base = y(candle.low) + 9 + laneOffset;
+        marker = svgNode('path', { d: `M ${center} ${base - 7} L ${center - 5} ${base + 2} L ${center + 5} ${base + 2} Z`, fill: sleeveColors[item.sleeve], class: 'marker' });
+      } else if (item.action === 'short') {
+        const base = y(candle.high) - 9 - laneOffset;
+        marker = svgNode('path', { d: `M ${center} ${base + 7} L ${center - 5} ${base - 2} L ${center + 5} ${base - 2} Z`, fill: sleeveColors[item.sleeve], class: 'marker' });
+      } else {
+        marker = svgNode('circle', { cx: center, cy: y(candle.close), r: 3.5, fill: sleeveColors[item.sleeve], class: 'marker' });
+      }
+      const title = svgNode('title');
+      title.textContent = `${item.label} ${item.action.toUpperCase()} · ${item.actualTime}${item.eventCount > 1 ? ` · 同K线${item.eventCount}次变化` : ''}`;
+      marker.appendChild(title);
+      marker.addEventListener('click', () => {
+        root.querySelector('[data-label="selection"]').textContent = title.textContent;
+      });
+      priceSvg.appendChild(marker);
+    });
+  }
+
+  function renderEquity() {
+    clear(equitySvg);
+    const size = chartSize(equitySvg, 250);
+    equitySvg.setAttribute('viewBox', `0 0 ${size.width} ${size.height}`);
+    const box = { left: 57, top: 10, width: size.width - 75, height: size.height - 40 };
+    const lastTime = DATA.equity[DATA.equity.length - 1].time;
+    const cutoff = visibleFrom(lastTime);
+    const equity = DATA.equity.filter(item => item.time >= cutoff);
+    const drawdown = DATA.drawdown.filter(item => item.time >= cutoff);
+    const allValues = [...equity.map(item => item.value), ...drawdown.map(item => item.value), 0];
+    const minimum = Math.min(...allValues);
+    const maximum = Math.max(...allValues);
+    const padding = Math.max(2, (maximum - minimum) * 0.08);
+    const low = minimum - padding;
+    const high = maximum + padding;
+    const timeSpan = Math.max(1, equity[equity.length - 1].time - equity[0].time);
+    const x = time => box.left + (time - equity[0].time) / timeSpan * box.width;
+    const y = value => box.top + (high - value) / (high - low) * box.height;
+    addGrid(equitySvg, box, low, high, value => `${value.toFixed(0)}%`);
+    addTimeLabels(equitySvg, equity, box, x);
+    const equityPath = equity.map((item, index) => `${index ? 'L' : 'M'} ${x(item.time)} ${y(item.value)}`).join(' ');
+    equitySvg.appendChild(svgNode('path', { d: equityPath, class: 'equity-line' }));
+    if (drawdown.length) {
+      const zero = y(0);
+      const path = [`M ${x(drawdown[0].time)} ${zero}`, ...drawdown.map(item => `L ${x(item.time)} ${y(item.value)}`), `L ${x(drawdown[drawdown.length - 1].time)} ${zero}`, 'Z'].join(' ');
+      equitySvg.insertBefore(svgNode('path', { d: path, class: 'drawdown-area' }), equitySvg.querySelector('.equity-line'));
+    }
+  }
+
+  root.querySelectorAll('[data-range]').forEach(button => button.addEventListener('click', () => {
+    root.querySelectorAll('[data-range]').forEach(peer => peer.setAttribute('aria-pressed', String(peer === button)));
+    rangeDays = button.dataset.range === 'all' ? null : Number(button.dataset.range);
+    renderPrice();
+    renderEquity();
+  }));
+
+  const monthHead = root.querySelector('[data-table="months"]');
+  const monthValues = root.querySelector('[data-table="returns"]');
+  DATA.monthly.forEach(item => {
+    const th = document.createElement('th');
+    th.scope = 'col';
+    th.className = 'text-center text-nowrap';
+    th.textContent = item.month;
+    const td = document.createElement('td');
+    td.className = `text-center text-nowrap ${item.return >= 0 ? 'monthly-positive' : 'monthly-negative'}`;
+    td.textContent = `${item.return >= 0 ? '+' : ''}${item.return.toFixed(1)}%`;
+    monthHead.appendChild(th);
+    monthValues.appendChild(td);
+  });
+
+  renderPrice();
+  renderEquity();
+  let resizeFrame = null;
+  new ResizeObserver(() => {
+    if (resizeFrame) cancelAnimationFrame(resizeFrame);
+    resizeFrame = requestAnimationFrame(() => { renderPrice(); renderEquity(); });
+  }).observe(root);
+})();
+</script>
