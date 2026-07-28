@@ -78,6 +78,61 @@ uv run trend-trader-funding-download \
 
 `venue, instrument_id, timestamp, funding_rate, realized_rate, method, formula_type`
 
+## 实时采集 OKX 资金费率
+
+`trend-trader-funding-collector` 同时维护两类 Parquet 数据：
+
+- `funding_snapshot`：通过公共 WebSocket 更新内存状态，在每个 UTC 整分钟写入一次；
+- `funding_history`：通过历史接口确认结算后的 `realizedRate`，并将它保存为
+  `funding_rate`。
+
+启动时通过 REST 初始化所有 `state=live` 的永续合约，WebSocket 断线会自动重连。
+内存状态超过 120 秒未更新时标记为 `stale`，每 5 分钟通过 REST 补偿；合约列表
+每小时刷新。历史结算会在预计结算时间后确认，并每小时重新核对默认最近 10 个
+UTC 日。历史窗口从“当前 UTC 当日 00:00 减去指定天数”开始计算。
+
+本地单合约冒烟测试：
+
+```bash
+uv run trend-trader-funding-collector \
+  --once \
+  --instrument-id BTC-USDT-SWAP \
+  --data-root data/market/v1
+```
+
+云服务器常驻运行：
+
+```bash
+uv run trend-trader-funding-collector \
+  --data-root /data/market/v1
+```
+
+不传 `--instrument-id` 时采集全部 live SWAP。`--instrument-id` 仅用于测试。所有
+时间列均为带 `UTC` 时区的毫秒时间戳。需要改变默认 10 日窗口时传入
+`--history-days T`。文件结构为：
+
+```text
+/data/market/v1/
+├── funding_snapshot/
+│   └── year=2026/
+│       └── date=2026-07-28/
+│           └── funding_snapshot-2026-07-28.parquet
+└── funding_history/
+    └── year=2026/
+        └── date=2026-07-28/
+            └── funding_history-2026-07-28.parquet
+```
+
+分钟快照字段：
+
+`venue, instrument_id, snapshot_time, exchange_ts, received_at, funding_rate,`
+`next_funding_rate, funding_time, next_funding_time, interest_rate, premium,`
+`method, formula_type, data_source, data_status`
+
+实际结算字段：
+
+`venue, instrument_id, funding_time, funding_rate, received_at, method, formula_type`
+
 ## 统一数据查询 API
 
 上层代码可以通过同一个 `MarketDataClient` 查询不同数据集。时间范围统一为 UTC
