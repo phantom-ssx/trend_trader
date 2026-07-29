@@ -133,6 +133,60 @@ uv run trend-trader-funding-collector \
 
 `venue, instrument_id, funding_time, funding_rate, received_at, method, formula_type`
 
+## 实时采集 OKX 合约持仓量
+
+`trend-trader-open-interest-collector` 通过公共 WebSocket `open-interest` 维护
+单合约最新状态，并在每个 UTC 整分钟写入 `open_interest_snapshot`。启动时使用
+REST 初始化，状态超过 120 秒未更新时标记为 `stale`，每 5 分钟通过 REST
+批量补偿；live 合约列表每小时刷新。
+
+默认同时采集 `SWAP`（永续合约）和 `FUTURES`（交割合约）：
+
+```bash
+uv run trend-trader-open-interest-collector \
+  --data-root /data/market/v1
+```
+
+单合约 REST 冒烟测试：
+
+```bash
+uv run trend-trader-open-interest-collector \
+  --once \
+  --instrument-id BTC-USDT-SWAP \
+  --data-root data/market/v1
+```
+
+只采集永续合约时使用：
+
+```bash
+uv run trend-trader-open-interest-collector \
+  --instrument-type SWAP \
+  --data-root /data/market/v1
+```
+
+文件结构为：
+
+```text
+/data/market/v1/
+└── open_interest_snapshot/
+    └── year=2026/
+        └── date=2026-07-28/
+            └── open_interest_snapshot-2026-07-28.parquet
+```
+
+分钟快照字段：
+
+`venue, instrument_id, instrument_type, instrument_family, base_currency,`
+`settle_currency, contract_type, expiration_time, snapshot_time, exchange_ts,`
+`received_at, open_interest, open_interest_ccy, open_interest_usd, data_source,`
+`data_status`
+
+`open_interest_snapshot` 是单合约当前截面的本地分钟历史。统一查询 API 中已有的
+`open_interest` 则来自 OKX Rubik，是币种级 `SWAP + FUTURES` 的 5 分钟汇总，
+两者不会自动混合。合约元数据来自同一次 instruments 列表刷新，因此可以直接按
+`instrument_family`、`base_currency`、到期时间或合约类型筛选，不依赖解析
+`instrument_id`。
+
 ## 统一数据查询 API
 
 上层代码可以通过同一个 `MarketDataClient` 查询不同数据集。时间范围统一为 UTC
