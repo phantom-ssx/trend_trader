@@ -192,16 +192,20 @@ OKX 模块 1、2、3、11 的“日”按 UTC+8 解释；订单簿模块 4、5�
 
 对于需要合并的全市场日文件，不能随着每个合约下载完成就直接 append。正确流程是：
 
-1. 各合约/币种的 Raw 文件或 REST 响应先独立下载到 staging；
-2. 每个来源文件分别解析为临时 Arrow/Parquet fragment；
-3. 所有 fragment 完成并通过校验后，执行外部排序；
-4. 流式写入一个日级 Parquet 临时文件；
-5. 校验行数、主键、时间范围和 Parquet footer；
-6. 使用 `os.replace` 原子替换正式日文件；
-7. 删除可重建的临时 fragment，Raw 文件继续保留。
+1. 各合约/币种的 Raw 文件或 REST 响应先独立下载；
+2. ZIP 成员直接通过 `ZipExtFile + csv.DictReader` 流式读取，不把解压内容整体载入
+   内存；
+3. 每 `stream_batch_rows` 行规范化一次，并写入位于数据盘 `.staging` 目录的临时
+   SQLite 表；
+4. SQLite 使用业务主键去重，依靠磁盘 B-tree 完成外部排序；
+5. 按排序游标每批读取固定行数，通过 `PyArrow ParquetWriter` 写入日级临时文件；
+6. 校验行数、主键、时间范围和 Parquet footer；
+7. 使用 `os.replace` 原子替换正式日文件；
+8. 删除可重建的临时 SQLite，Raw 文件继续永久保留。
 
-不允许把所有合约数据一次性加载进内存。实现应使用 PyArrow
-`ParquetWriter`/record batch 或 Polars streaming 逐批写入。
+不允许把所有合约数据一次性加载进内存。SQLite 设置 `temp_store=FILE` 和有限
+cache；已有日文件也使用 Parquet record batch 重新摄入。默认每批 25,000 行、
+SQLite cache 64 MiB，可在 2 GiB 服务器上进一步调低。
 
 逐笔和 L2 不执行全市场 compaction。解析器按
 `dataset + UTC date + instrument_id` 输出临时 fragment；同一输出键的 fragment

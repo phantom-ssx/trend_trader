@@ -131,6 +131,8 @@ class OfflineSyncConfig(BaseModel):
     min_free_disk_ratio: float = Field(default=0.20, ge=0.05, le=0.90)
     parquet_compression: str = "zstd"
     parquet_row_group_size: int = Field(default=1_000_000, ge=10_000)
+    stream_batch_rows: int = Field(default=25_000, ge=1_000, le=250_000)
+    sqlite_cache_mb: int = Field(default=64, ge=16, le=512)
     raw_retention: str = "permanent"
 
     @field_validator("okx_base_url", "historical_page_base_url")

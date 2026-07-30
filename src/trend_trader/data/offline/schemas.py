@@ -5,7 +5,7 @@ import io
 import json
 import re
 import zipfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -232,6 +232,15 @@ def instrument_type(instrument_id: str) -> str:
 
 
 def parse_candle_archive(path: Path) -> pl.DataFrame:
+    batches = list(iter_candle_archive_batches(path))
+    return pl.concat(batches, how="vertical_relaxed") if batches else empty_frame(CANDLE_SCHEMA)
+
+
+def iter_candle_archive_batches(
+    path: Path,
+    *,
+    batch_size: int = 25_000,
+) -> Iterator[pl.DataFrame]:
     rows: list[dict[str, object]] = []
     for source, member_name in _zip_csv_rows(path):
         inferred = _instrument_from_filename(member_name)
@@ -258,10 +267,23 @@ def parse_candle_archive(path: Path) -> pl.DataFrame:
                     "confirm": _pick(row, "confirm") or "1",
                 }
             )
-    return _frame(rows, CANDLE_SCHEMA)
+            if len(rows) >= batch_size:
+                yield _frame(rows, CANDLE_SCHEMA)
+                rows = []
+    if rows:
+        yield _frame(rows, CANDLE_SCHEMA)
 
 
 def parse_funding_archive(path: Path) -> pl.DataFrame:
+    batches = list(iter_funding_archive_batches(path))
+    return pl.concat(batches, how="vertical_relaxed") if batches else empty_frame(FUNDING_SCHEMA)
+
+
+def iter_funding_archive_batches(
+    path: Path,
+    *,
+    batch_size: int = 25_000,
+) -> Iterator[pl.DataFrame]:
     rows: list[dict[str, object]] = []
     for source, member_name in _zip_csv_rows(path):
         inferred = _instrument_from_filename(member_name)
@@ -283,7 +305,11 @@ def parse_funding_archive(path: Path) -> pl.DataFrame:
                     "method": _pick(row, "method"),
                 }
             )
-    return _frame(rows, FUNDING_SCHEMA)
+            if len(rows) >= batch_size:
+                yield _frame(rows, FUNDING_SCHEMA)
+                rows = []
+    if rows:
+        yield _frame(rows, FUNDING_SCHEMA)
 
 
 def price_candle_frame(
@@ -508,12 +534,12 @@ def _zip_csv_rows(path: Path) -> Iterable[tuple[csv.DictReader[str], str]]:
         for member in archive.infolist():
             if member.is_dir() or not member.filename.lower().endswith((".csv", ".txt")):
                 continue
-            content = archive.read(member)
-            text = io.TextIOWrapper(io.BytesIO(content), encoding="utf-8-sig", newline="")
-            reader = csv.DictReader(text)
-            if not reader.fieldnames:
-                continue
-            yield reader, member.filename
+            with archive.open(member) as compressed:
+                with io.TextIOWrapper(compressed, encoding="utf-8-sig", newline="") as text:
+                    reader = csv.DictReader(text)
+                    if not reader.fieldnames:
+                        continue
+                    yield reader, member.filename
 
 
 def _frame(rows: list[dict[str, object]], schema: Mapping[str, pl.DataType]) -> pl.DataFrame:
@@ -555,7 +581,7 @@ def _normalize_key(value: str) -> str:
 def _instrument_from_filename(filename: str) -> str:
     name = Path(filename).stem.upper()
     match = re.search(
-        r"([A-Z0-9]+-(?:USD|USDT|USDC)-(?:SWAP|\\d{6,8}))",
+        r"([A-Z0-9]+-(?:USD|USDT|USDC)-(?:SWAP|\d{6,8}))",
         name,
     )
     return match.group(1) if match else ""

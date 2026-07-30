@@ -109,3 +109,36 @@ journalctl -u trend-trader-offline-sync.service -n 200 --no-pager
 私有 API 只能自动回补近 3 个月。更早的最终订单、成交和账单，需要从 OKX 网页生成
 2021-01-28 以来的 Trading history 报表；这部分是一次性人工导出流程，不应把网页登录
 凭证交给定时下载程序。
+
+## 6. 小内存服务器与 OOM
+
+历史 K 线和资金费率使用有界内存流程：ZIP/CSV 固定批次读取，临时 SQLite 在数据盘
+完成主键去重和外部排序，PyArrow 再分批写入最终日级 Parquet。相关配置为：
+
+```toml
+stream_batch_rows = 25000
+sqlite_cache_mb = 64
+```
+
+对于 2 GiB 服务器，先使用默认值。如果仍然出现内核 OOM，可调整为：
+
+```toml
+stream_batch_rows = 10000
+sqlite_cache_mb = 32
+```
+
+批次越小，峰值内存越低，但 SQLite 插入和 Parquet 写入速度会下降。临时数据库位于：
+
+```text
+/data/market/v1/offline/.staging/
+```
+
+异常退出后再次运行是安全的：正式 Parquet 通过 `os.replace` 原子提交，SQLite 临时
+文件可删除，catalog 会把上一次未结束的 run 标记为 `interrupted`。确认没有同步进程
+运行后，可清理遗留 staging：
+
+```bash
+pgrep -af trend-trader-offline
+sudo -u trader find /data/market/v1/offline/.staging \
+  -maxdepth 1 -type f -name '*.sqlite*' -delete
+```

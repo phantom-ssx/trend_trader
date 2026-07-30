@@ -21,8 +21,8 @@ from trend_trader.data.offline.config import DatasetOptions, OfflineSyncConfig
 from trend_trader.data.offline.schemas import (
     DATASET_STORAGE,
     aggregate_oi_frame,
-    parse_candle_archive,
-    parse_funding_archive,
+    iter_candle_archive_batches,
+    iter_funding_archive_batches,
     price_candle_frame,
     private_bills_frame,
     private_fills_frame,
@@ -34,6 +34,7 @@ from trend_trader.data.offline.storage import (
     DailyParquetRepository,
     OfflineLayout,
     RawRepository,
+    StreamingDailyParquetRepository,
     sha256_file,
     write_run_report,
 )
@@ -69,6 +70,14 @@ class DatasetResult:
     rows: int = 0
     files: list[str] = field(default_factory=list)
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class HistoricalRawFile:
+    path: Path
+    url: str
+    sha256: str
+    instrument_type: str
 
 
 class OfflineSynchronizer:
@@ -154,6 +163,7 @@ class OfflineSynchronizer:
             "results": [],
         }
         with self.catalog.execution_lock():
+            report["removed_stale_staging_files"] = self._cleanup_staging()
             report["recovered_interrupted_runs"] = self.catalog.recover_interrupted_runs()
             self.catalog.begin_run(run_id, mode, report)
             try:
@@ -200,8 +210,8 @@ class OfflineSynchronizer:
     async def _execute(self, client: OkxOfflineClient, task: SyncTask) -> DatasetResult:
         try:
             if task.dataset in HISTORICAL_MODULES:
-                files, frame = await self._historical_file_dataset(client, task)
-            elif task.dataset in {"mark_price_candles", "index_price_candles"}:
+                return await self._execute_historical_file_dataset(client, task)
+            if task.dataset in {"mark_price_candles", "index_price_candles"}:
                 files, frame = await self._price_dataset(client, task)
             elif task.dataset == "aggregate_open_interest":
                 files, frame = await self._open_interest_dataset(client, task)
@@ -276,15 +286,129 @@ class OfflineSynchronizer:
                 error=f"{type(exc).__name__}: {exc}",
             )
 
-    async def _historical_file_dataset(
+    async def _execute_historical_file_dataset(
         self,
         client: OkxOfflineClient,
         task: SyncTask,
-    ) -> tuple[list[Path], pl.DataFrame]:
+    ) -> DatasetResult:
+        raw_files = await self._download_historical_files(client, task)
+        state: dict[str, str | None] = {"first_event": None}
+
+        def batches() -> Iterable[pl.DataFrame]:
+            iterator = (
+                iter_candle_archive_batches
+                if task.dataset == "candles"
+                else iter_funding_archive_batches
+            )
+            for raw_file in raw_files:
+                try:
+                    for frame in iterator(
+                        raw_file.path,
+                        batch_size=self.config.stream_batch_rows,
+                    ):
+                        self._remember_instruments(frame, task.target_date)
+                        first_event = _first_timestamp_text(frame)
+                        if first_event and (
+                            state["first_event"] is None
+                            or first_event < state["first_event"]
+                        ):
+                            state["first_event"] = first_event
+                        yield frame
+                except Exception:
+                    quarantine = self.layout.quarantine_dir(
+                        task.dataset, task.target_date
+                    )
+                    quarantine.mkdir(parents=True, exist_ok=True)
+                    destination = quarantine / (
+                        f"{raw_file.path.stem}.bad-{uuid4().hex[:8]}"
+                        f"{raw_file.path.suffix}"
+                    )
+                    raw_file.path.replace(destination)
+                    raise
+
+        schema, key, timestamp = DATASET_STORAGE[task.dataset]
+        repository = StreamingDailyParquetRepository(
+            self.layout,
+            dataset=task.dataset,
+            schema=schema,
+            primary_key=key,
+            timestamp_column=timestamp,
+            sort_columns=[timestamp, *[item for item in key if item != timestamp]],
+            compression=self.config.parquet_compression,
+            row_group_size=self.config.parquet_row_group_size,
+            source_name="okx_historical_file",
+            batch_rows=self.config.stream_batch_rows,
+            sqlite_cache_mb=self.config.sqlite_cache_mb,
+        )
+        outputs, input_rows = repository.write_batches(batches())
+        for raw_file in raw_files:
+            self.catalog.record_artifact(
+                raw_file.path,
+                dataset=task.dataset,
+                source_url=raw_file.url,
+                source_sha256=raw_file.sha256,
+                metadata={
+                    "source_date": task.target_date.isoformat(),
+                    "date_basis": "UTC+08:00",
+                    "instrument_type": raw_file.instrument_type,
+                },
+            )
+        for target_date, path, row_count in outputs:
+            self.catalog.record_artifact(
+                path,
+                dataset=task.dataset,
+                source_url=None,
+                source_sha256=None,
+                metadata={
+                    "utc_date": target_date.isoformat(),
+                    "rows": row_count,
+                    "compaction": "sqlite_streaming",
+                },
+            )
+        status = "complete" if input_rows else "unavailable"
+        artifact = str(outputs[0][1]) if outputs else None
+        self.catalog.mark_coverage(
+            task.dataset,
+            task.target_date,
+            status=status,
+            row_count=input_rows,
+            scope_key=task.scope_key,
+            artifact_path=artifact,
+        )
+        if state["first_event"]:
+            self.catalog.upsert_availability(
+                task.dataset,
+                task.scope_key,
+                first_event_time=state["first_event"],
+                continuous_start=self.catalog.earliest_complete_date(
+                    task.dataset, task.scope_key
+                ),
+                discovery_method="historical_file_stream",
+                status="observed",
+            )
+        return DatasetResult(
+            task.dataset,
+            task.target_date.isoformat(),
+            task.scope_key,
+            status,
+            rows=input_rows,
+            files=[
+                str(item)
+                for item in [
+                    *(raw_file.path for raw_file in raw_files),
+                    *(output[1] for output in outputs),
+                ]
+            ],
+        )
+
+    async def _download_historical_files(
+        self,
+        client: OkxOfflineClient,
+        task: SyncTask,
+    ) -> list[HistoricalRawFile]:
         module = HISTORICAL_MODULES[task.dataset]
         instrument_types = ("SWAP", "FUTURES") if task.dataset == "candles" else ("SWAP",)
-        raw_files: list[Path] = []
-        fragments: list[pl.DataFrame] = []
+        raw_files: list[HistoricalRawFile] = []
         for instrument_type in instrument_types:
             links = await client.historical_links(
                 module=module,
@@ -301,40 +425,19 @@ class OfflineSynchronizer:
                 ).name
                 destination = self.layout.raw_dir(task.dataset, task.target_date) / filename
                 downloaded, digest = await client.download(url, destination)
-                parser = (
-                    parse_candle_archive
-                    if task.dataset == "candles"
-                    else parse_funding_archive
-                )
-                try:
-                    fragment = parser(downloaded)
-                except Exception:
-                    quarantine = self.layout.quarantine_dir(
-                        task.dataset, task.target_date
+                raw_files.append(
+                    HistoricalRawFile(
+                        path=downloaded,
+                        url=url,
+                        sha256=digest,
+                        instrument_type=instrument_type,
                     )
-                    quarantine.mkdir(parents=True, exist_ok=True)
-                    downloaded.replace(quarantine / downloaded.name)
-                    raise
-                raw_files.append(downloaded)
-                fragments.append(fragment)
-                self.catalog.record_artifact(
-                    downloaded,
-                    dataset=task.dataset,
-                    source_url=url,
-                    source_sha256=digest,
-                    metadata={
-                        "source_date": task.target_date.isoformat(),
-                        "date_basis": "UTC+08:00",
-                        "instrument_type": instrument_type,
-                    },
                 )
-        schema = DATASET_STORAGE[task.dataset][0]
-        frame = _concat(fragments, schema)
         if not raw_files:
             raise FileNotFoundError(
                 f"OKX has not published {task.dataset} for {task.target_date}"
             )
-        return raw_files, frame
+        return raw_files
 
     async def _price_dataset(
         self,
@@ -620,6 +723,17 @@ class OfflineSynchronizer:
                 f"free disk ratio {usage.free / usage.total:.1%} is below "
                 f"{self.config.min_free_disk_ratio:.1%}"
             )
+
+    def _cleanup_staging(self) -> int:
+        staging = self.layout.root / ".staging"
+        if not staging.exists():
+            return 0
+        removed = 0
+        for path in staging.glob("*.sqlite*"):
+            if path.is_file():
+                path.unlink()
+                removed += 1
+        return removed
 
 
 def _date_range(first: date, last: date) -> Iterable[date]:
