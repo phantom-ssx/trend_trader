@@ -6,8 +6,8 @@ RequiresMountsFor=/data/market/v1/offline
 
 [Service]
 Type=oneshot
-User=trend-trader
-Group=trend-trader
+User=trader
+Group=trader
 WorkingDirectory=/opt/trend-trader
 EnvironmentFile=/etc/trend-trader/offline-sync.env
 ExecStart=/opt/trend-trader/.venv/bin/trend-trader-offline-sync --config /etc/trend-trader/offline-sync.toml daily

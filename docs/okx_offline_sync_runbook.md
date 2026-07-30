@@ -2,15 +2,20 @@
 
 当前代码只完成实现和本地测试；下面命令应在云服务器确认路径、用户和密钥后执行。
 生产数据根目录固定为 `/data/market/v1/offline`，不会写入现有实时 snapshot 目录。
+服务器服务账户固定为 `trader`；`trend-trader` 只用于项目目录、命令和 systemd
+unit 名称，不是 Linux 用户名。
 
 ## 1. 准备配置
 
 ```bash
-sudo install -d -m 0750 -o trend-trader -g trend-trader /etc/trend-trader
-sudo install -d -m 0750 -o trend-trader -g trend-trader /data/market/v1/offline
-sudo cp configs/offline_sync.example.toml /etc/trend-trader/offline-sync.toml
-sudo cp deploy/systemd/offline-sync.env.example /etc/trend-trader/offline-sync.env
-sudo chmod 0600 /etc/trend-trader/offline-sync.env
+id trader
+sudo install -d -m 0750 -o trader -g trader /opt/trend-trader
+sudo install -d -m 0750 -o trader -g trader /etc/trend-trader
+sudo install -d -m 0750 -o trader -g trader /data/market/v1/offline
+sudo install -m 0600 -o trader -g trader \
+  configs/offline_sync.example.toml /etc/trend-trader/offline-sync.toml
+sudo install -m 0600 -o trader -g trader \
+  deploy/systemd/offline-sync.env.example /etc/trend-trader/offline-sync.env
 ```
 
 在 TOML 中为主账户和实际交易子账户分别增加 `[[private_accounts]]`。在
@@ -27,21 +32,21 @@ OKX key 只授予读取权限，不授予交易或提币权限。
 项目假定部署在 `/opt/trend-trader`，虚拟环境位于 `/opt/trend-trader/.venv`：
 
 ```bash
-cd /opt/trend-trader
-uv sync --frozen
-set -a
-source /etc/trend-trader/offline-sync.env
-set +a
-.venv/bin/trend-trader-offline-sync \
-  --config /etc/trend-trader/offline-sync.toml plan --mode daily
+sudo chown -R trader:trader /opt/trend-trader
+sudo -u trader sh -c '
+  cd /opt/trend-trader
+  uv sync --frozen
+  .venv/bin/trend-trader-offline-sync \
+    --config /etc/trend-trader/offline-sync.toml plan --mode daily
+'
 ```
 
 `plan` 只列出任务，不请求 OKX、不下载数据。可用下列命令做一个小范围首跑：
 
 ```bash
-.venv/bin/trend-trader-offline-sync \
-  --config /etc/trend-trader/offline-sync.toml range \
-  --start 2026-07-27 --end 2026-07-28 --dataset candles
+sudo -u trader /opt/trend-trader/.venv/bin/trend-trader-offline-sync \
+  --config /etc/trend-trader/offline-sync.toml \
+  range --start 2026-07-27 --end 2026-07-28 --dataset candles
 ```
 
 ## 3. 启用定时器
@@ -67,13 +72,18 @@ SQLite outbox，下一次运行会重试。
 
 ```bash
 # 指定数据集和区间
-.venv/bin/trend-trader-offline-sync \
+sudo -u trader /opt/trend-trader/.venv/bin/trend-trader-offline-sync \
   --config /etc/trend-trader/offline-sync.toml range \
   --start 2023-07-01 --end 2023-07-31 --dataset candles
 
 # 按每个数据集配置的最早时间回补所有缺口
-.venv/bin/trend-trader-offline-sync \
-  --config /etc/trend-trader/offline-sync.toml backfill
+sudo -u trader sh -c '
+  set -a
+  . /etc/trend-trader/offline-sync.env
+  set +a
+  exec /opt/trend-trader/.venv/bin/trend-trader-offline-sync \
+    --config /etc/trend-trader/offline-sync.toml backfill
+'
 ```
 
 完整 `backfill` 可能运行很久，建议在独立 systemd service 或 tmux 中执行。文件和
@@ -83,10 +93,10 @@ catalog 都是幂等的；重新运行只处理未解决日期。逐笔与 L2 �
 ## 5. 查看结果和实际可得区间
 
 ```bash
-.venv/bin/trend-trader-offline-sync \
+sudo -u trader /opt/trend-trader/.venv/bin/trend-trader-offline-sync \
   --config /etc/trend-trader/offline-sync.toml status
 
-.venv/bin/trend-trader-offline-sync \
+sudo -u trader /opt/trend-trader/.venv/bin/trend-trader-offline-sync \
   --config /etc/trend-trader/offline-sync.toml availability
 
 journalctl -u trend-trader-offline-sync.service -n 200 --no-pager

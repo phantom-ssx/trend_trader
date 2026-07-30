@@ -653,8 +653,8 @@ RequiresMountsFor=/data/market/v1/offline
 
 [Service]
 Type=oneshot
-User=trend-trader
-Group=trend-trader
+User=trader
+Group=trader
 WorkingDirectory=/opt/trend-trader
 EnvironmentFile=/etc/trend-trader/offline-sync.env
 Environment=PYTHONDONTWRITEBYTECODE=1
@@ -709,9 +709,9 @@ WantedBy=timers.target
 ```bash
 sudo install -m 0644 deploy/systemd/trend-trader-offline-sync.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/trend-trader-offline-sync.timer /etc/systemd/system/
-sudo install -d -o trend-trader -g trend-trader -m 0700 /etc/trend-trader
-sudo install -o trend-trader -g trend-trader -m 0600 deploy/config/offline-sync.env /etc/trend-trader/offline-sync.env
-sudo install -o trend-trader -g trend-trader -m 0600 deploy/config/offline-sync.toml /etc/trend-trader/offline-sync.toml
+sudo install -d -o trader -g trader -m 0700 /etc/trend-trader
+sudo install -o trader -g trader -m 0600 deploy/config/offline-sync.env /etc/trend-trader/offline-sync.env
+sudo install -o trader -g trader -m 0600 deploy/config/offline-sync.toml /etc/trend-trader/offline-sync.toml
 sudo systemd-analyze verify /etc/systemd/system/trend-trader-offline-sync.service
 sudo systemd-analyze verify /etc/systemd/system/trend-trader-offline-sync.timer
 sudo systemctl daemon-reload
@@ -721,9 +721,9 @@ sudo systemctl enable --now trend-trader-offline-sync.timer
 启用前必须先运行：
 
 ```bash
-sudo -u trend-trader /opt/trend-trader/.venv/bin/trend-trader-offline-sync plan \
+sudo -u trader /opt/trend-trader/.venv/bin/trend-trader-offline-sync plan \
   --config /etc/trend-trader/offline-sync.toml
-sudo -u trend-trader /opt/trend-trader/.venv/bin/trend-trader-offline-notify check \
+sudo -u trader /opt/trend-trader/.venv/bin/trend-trader-offline-notify check \
   --env-file /etc/trend-trader/offline-sync.env
 sudo systemctl start trend-trader-offline-sync.service
 systemctl list-timers trend-trader-offline-sync.timer
@@ -749,7 +749,7 @@ BARK_SUCCESS_LEVEL=active
 BARK_FAILURE_LEVEL=timeSensitive
 ```
 
-- 文件权限必须是 `0600`，属主 `trend-trader:trend-trader`；
+- 文件权限必须是 `0600`，属主 `trader:trader`；
 - `BARK_URL` 包含设备 key，日志、run report、异常消息中必须脱敏；
 - HTTP 超时 10 秒，按 1、3、9 秒间隔最多重试 3 次；
 - 校验 HTTP 2xx；响应中存在 `code` 时还必须为成功值；
