@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
@@ -184,8 +185,16 @@ class OfflineSynchronizer:
                     report["current_instruments"] = len(instruments)
                     for task in tasks:
                         self._check_disk()
+                        _progress(
+                            f"start dataset={task.dataset} date={task.target_date} "
+                            f"scope={task.scope_key}"
+                        )
                         result = await self._execute(client, task)
                         report["results"].append(asdict(result))
+                        _progress(
+                            f"finish dataset={task.dataset} date={task.target_date} "
+                            f"scope={task.scope_key} status={result.status} rows={result.rows}"
+                        )
                 failures = [row for row in report["results"] if row["status"] == "failed"]
                 report["status"] = "partial_failure" if failures else "success"
                 report["failed_tasks"] = len(failures)
@@ -292,9 +301,12 @@ class OfflineSynchronizer:
         task: SyncTask,
     ) -> DatasetResult:
         raw_files = await self._download_historical_files(client, task)
-        state: dict[str, str | None] = {"first_event": None}
+        first_event_seen: str | None = None
+        parsed_rows = 0
+        next_progress_rows = 250_000
 
         def batches() -> Iterable[pl.DataFrame]:
+            nonlocal first_event_seen, next_progress_rows, parsed_rows
             iterator = (
                 iter_candle_archive_batches
                 if task.dataset == "candles"
@@ -309,10 +321,19 @@ class OfflineSynchronizer:
                         self._remember_instruments(frame, task.target_date)
                         first_event = _first_timestamp_text(frame)
                         if first_event and (
-                            state["first_event"] is None
-                            or first_event < state["first_event"]
+                            first_event_seen is None
+                            or first_event < first_event_seen
                         ):
-                            state["first_event"] = first_event
+                            first_event_seen = first_event
+                        parsed_rows += frame.height
+                        if parsed_rows >= next_progress_rows:
+                            _progress(
+                                f"parse dataset={task.dataset} date={task.target_date} "
+                                f"rows={parsed_rows}"
+                            )
+                            next_progress_rows = (
+                                parsed_rows // 250_000 + 1
+                            ) * 250_000
                         yield frame
                 except Exception:
                     quarantine = self.layout.quarantine_dir(
@@ -338,7 +359,8 @@ class OfflineSynchronizer:
             row_group_size=self.config.parquet_row_group_size,
             source_name="okx_historical_file",
             batch_rows=self.config.stream_batch_rows,
-            sqlite_cache_mb=self.config.sqlite_cache_mb,
+            compaction_memory_mb=self.config.compaction_memory_mb,
+            compaction_threads=self.config.compaction_threads,
         )
         outputs, input_rows = repository.write_batches(batches())
         for raw_file in raw_files:
@@ -362,7 +384,7 @@ class OfflineSynchronizer:
                 metadata={
                     "utc_date": target_date.isoformat(),
                     "rows": row_count,
-                    "compaction": "sqlite_streaming",
+                    "compaction": "duckdb_external_sort",
                 },
             )
         status = "complete" if input_rows else "unavailable"
@@ -375,11 +397,11 @@ class OfflineSynchronizer:
             scope_key=task.scope_key,
             artifact_path=artifact,
         )
-        if state["first_event"]:
+        if first_event_seen:
             self.catalog.upsert_availability(
                 task.dataset,
                 task.scope_key,
-                first_event_time=state["first_event"],
+                first_event_time=first_event_seen,
                 continuous_start=self.catalog.earliest_complete_date(
                     task.dataset, task.scope_key
                 ),
@@ -424,7 +446,15 @@ class OfflineSynchronizer:
                     or f"{instrument_type.lower()}-{task.dataset}-{number}.zip"
                 ).name
                 destination = self.layout.raw_dir(task.dataset, task.target_date) / filename
+                _progress(
+                    f"download dataset={task.dataset} date={task.target_date} "
+                    f"file={filename}"
+                )
                 downloaded, digest = await client.download(url, destination)
+                _progress(
+                    f"downloaded dataset={task.dataset} date={task.target_date} "
+                    f"file={downloaded.name} bytes={downloaded.stat().st_size}"
+                )
                 raw_files.append(
                     HistoricalRawFile(
                         path=downloaded,
@@ -729,9 +759,12 @@ class OfflineSynchronizer:
         if not staging.exists():
             return 0
         removed = 0
-        for path in staging.glob("*.sqlite*"):
+        for path in staging.iterdir():
             if path.is_file():
                 path.unlink()
+                removed += 1
+            elif path.is_dir():
+                shutil.rmtree(path)
                 removed += 1
         return removed
 
@@ -774,3 +807,7 @@ def _first_timestamp_text(frame: pl.DataFrame) -> str | None:
             value = frame.get_column(name).min()
             return value.isoformat() if value else None
     return None
+
+
+def _progress(message: str) -> None:
+    print(f"[offline-sync] {message}", file=sys.stderr, flush=True)

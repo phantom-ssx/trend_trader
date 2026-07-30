@@ -177,7 +177,8 @@ def test_streaming_repository_compacts_cross_day_batches_and_upserts(
         timestamp_column="timestamp",
         sort_columns=("timestamp", "instrument_id"),
         batch_rows=2,
-        sqlite_cache_mb=16,
+        compaction_memory_mb=128,
+        compaction_threads=1,
     )
     first_day = int(datetime(2026, 7, 28, tzinfo=UTC).timestamp() * 1000)
     second_day = int(datetime(2026, 7, 29, tzinfo=UTC).timestamp() * 1000)
@@ -364,7 +365,8 @@ def test_historical_candles_run_uses_streaming_compaction(tmp_path: Path) -> Non
     config.datasets.candles.enabled = True
     config.datasets.candles.start = target
     config.stream_batch_rows = 1_000
-    config.sqlite_cache_mb = 16
+    config.compaction_memory_mb = 128
+    config.compaction_threads = 1
 
     class FakeHistoricalClient:
         async def __aenter__(self) -> FakeHistoricalClient:

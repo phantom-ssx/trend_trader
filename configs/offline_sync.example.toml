@@ -9,7 +9,8 @@ min_free_disk_ratio = 0.20
 parquet_compression = "zstd"
 parquet_row_group_size = 1000000
 stream_batch_rows = 25000
-sqlite_cache_mb = 64
+compaction_memory_mb = 512
+compaction_threads = 2
 raw_retention = "permanent"
 
 [datasets.candles]

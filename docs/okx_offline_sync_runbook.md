@@ -112,33 +112,67 @@ journalctl -u trend-trader-offline-sync.service -n 200 --no-pager
 
 ## 6. 小内存服务器与 OOM
 
-历史 K 线和资金费率使用有界内存流程：ZIP/CSV 固定批次读取，临时 SQLite 在数据盘
-完成主键去重和外部排序，PyArrow 再分批写入最终日级 Parquet。相关配置为：
+历史 K 线和资金费率使用有界内存流程：ZIP/CSV 固定批次读取并写临时 Parquet
+fragment，DuckDB 在固定内存上限内完成主键去重和外部排序，PyArrow 再分批写入
+最终日级 Parquet。相关配置为：
 
 ```toml
 stream_batch_rows = 25000
-sqlite_cache_mb = 64
+compaction_memory_mb = 512
+compaction_threads = 2
 ```
 
 对于 2 GiB 服务器，先使用默认值。如果仍然出现内核 OOM，可调整为：
 
 ```toml
 stream_batch_rows = 10000
-sqlite_cache_mb = 32
+compaction_memory_mb = 384
+compaction_threads = 2
 ```
 
-批次越小，峰值内存越低，但 SQLite 插入和 Parquet 写入速度会下降。临时数据库位于：
+批次越小，解析峰值内存越低；DuckDB 超出内存限制后会自动使用数据盘完成排序。
+临时文件位于：
 
 ```text
 /data/market/v1/offline/.staging/
 ```
 
-异常退出后再次运行是安全的：正式 Parquet 通过 `os.replace` 原子提交，SQLite 临时
-文件可删除，catalog 会把上一次未结束的 run 标记为 `interrupted`。确认没有同步进程
-运行后，可清理遗留 staging：
+异常退出后再次运行是安全的：正式 Parquet 通过 `os.replace` 原子提交，fragment
+可删除，catalog 会把上一次未结束的 run 标记为 `interrupted`。新任务会自动清理旧
+staging；如需手工清理，必须先确认没有同步进程：
 
 ```bash
 pgrep -af trend-trader-offline
 sudo -u trader find /data/market/v1/offline/.staging \
-  -maxdepth 1 -type f -name '*.sqlite*' -delete
+  -mindepth 1 -depth -delete
+```
+
+## 7. 从 SQLite compactor 版本升级
+
+先停止仍在运行的旧回补任务，再更新代码和依赖：
+
+```bash
+sudo systemctl stop trend-trader-offline-backfill.service 2>/dev/null || true
+cd /opt/trend-trader
+git pull
+sudo -u trader sh -c 'cd /opt/trend-trader && uv sync --frozen'
+```
+
+在 `/etc/trend-trader/offline-sync.toml` 顶层删除旧的 `sqlite_cache_mb`，2 GiB
+服务器建议使用：
+
+```toml
+stream_batch_rows = 10000
+compaction_memory_mb = 384
+compaction_threads = 2
+```
+
+先重跑一个 UTC 日。CLI 会即时输出任务开始、Raw 下载完成、每解析 25 万行和最终
+提交状态，不再等整日转换完成后才显示输出：
+
+```bash
+sudo -u trader /usr/bin/time -v \
+  /opt/trend-trader/.venv/bin/trend-trader-offline-sync \
+  --config /etc/trend-trader/offline-sync.toml \
+  range --start 2023-07-01 --end 2023-07-01 --dataset candles
 ```

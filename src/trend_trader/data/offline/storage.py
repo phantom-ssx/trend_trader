@@ -5,15 +5,15 @@ import gzip
 import hashlib
 import json
 import os
-import sqlite3
+import shutil
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import duckdb
 import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -221,31 +221,33 @@ class DailyParquetRepository:
 
 
 class StreamingDailyParquetRepository(DailyParquetRepository):
-    """Bounded-memory daily compaction backed by an on-disk SQLite B-tree."""
+    """Fast bounded-memory compaction using Parquet fragments and DuckDB spilling."""
 
     def __init__(
         self,
         *args: object,
         batch_rows: int = 25_000,
-        sqlite_cache_mb: int = 64,
+        compaction_memory_mb: int = 512,
+        compaction_threads: int = 2,
         **kwargs: object,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.batch_rows = batch_rows
-        self.sqlite_cache_mb = sqlite_cache_mb
+        self.compaction_memory_mb = compaction_memory_mb
+        self.compaction_threads = compaction_threads
 
     def write_batches(
         self,
         frames: Iterable[pl.DataFrame],
     ) -> tuple[list[tuple[date, Path, int]], int]:
-        staging = self.layout.root / ".staging"
-        staging.mkdir(parents=True, exist_ok=True)
-        database_path = staging / f"{self.dataset}-{uuid4().hex}.sqlite"
-        initialized_dates: set[date] = set()
+        staging_root = self.layout.root / ".staging"
+        staging_root.mkdir(parents=True, exist_ok=True)
+        staging = staging_root / f"{self.dataset}-{uuid4().hex}"
+        staging.mkdir()
+        fragments: dict[date, list[Path]] = {}
         input_rows = 0
-        connection = sqlite3.connect(database_path)
+        source_order = 0
         try:
-            self._configure_sqlite(connection)
             for frame in frames:
                 normalized = canonicalize(frame, self.schema)
                 if normalized.is_empty():
@@ -259,106 +261,112 @@ class StreamingDailyParquetRepository(DailyParquetRepository):
                     .to_list()
                 )
                 for target_date in target_dates:
-                    table = _date_table(target_date)
-                    if target_date not in initialized_dates:
-                        self._create_table(connection, table)
-                        self._load_existing(connection, table, target_date)
-                        initialized_dates.add(target_date)
                     partition = normalized.filter(
                         pl.col(self.timestamp_column).dt.date() == target_date
+                    ).unique(
+                        subset=self.primary_key,
+                        keep="last",
                     )
-                    self._insert_frame(connection, table, partition)
-                connection.commit()
-            results = [
-                self._write_table(connection, _date_table(target_date), target_date)
-                for target_date in sorted(initialized_dates)
-            ]
+                    source_order += 1
+                    partition = partition.with_columns(
+                        pl.lit(source_order, dtype=pl.Int64).alias("__source_order")
+                    )
+                    fragment = staging / (
+                        f"{target_date:%Y%m%d}-{source_order:08d}.parquet"
+                    )
+                    partition.write_parquet(
+                        fragment,
+                        compression=self.compression,
+                        row_group_size=self.row_group_size,
+                        statistics=True,
+                    )
+                    fragments.setdefault(target_date, []).append(fragment)
+            connection = duckdb.connect()
+            try:
+                self._configure_duckdb(connection, staging)
+                results = [
+                    self._compact_date(connection, target_date, paths)
+                    for target_date, paths in sorted(fragments.items())
+                ]
+            finally:
+                connection.close()
             return results, input_rows
         finally:
-            connection.close()
-            database_path.unlink(missing_ok=True)
-            database_path.with_suffix(".sqlite-journal").unlink(missing_ok=True)
+            shutil.rmtree(staging, ignore_errors=True)
 
-    def _configure_sqlite(self, connection: sqlite3.Connection) -> None:
-        connection.execute("PRAGMA journal_mode=OFF")
-        connection.execute("PRAGMA synchronous=OFF")
-        connection.execute("PRAGMA temp_store=FILE")
-        connection.execute(f"PRAGMA cache_size=-{self.sqlite_cache_mb * 1024}")
-        connection.execute("PRAGMA locking_mode=EXCLUSIVE")
-
-    def _create_table(self, connection: sqlite3.Connection, table: str) -> None:
-        columns = ", ".join(
-            f"{_quote(name)} {_sqlite_type(dtype)}" for name, dtype in self.schema.items()
-        )
-        primary_key = ", ".join(_quote(name) for name in self.primary_key)
+    def _configure_duckdb(
+        self,
+        connection: duckdb.DuckDBPyConnection,
+        staging: Path,
+    ) -> None:
+        temporary = staging / "duckdb-tmp"
+        temporary.mkdir()
         connection.execute(
-            f"CREATE TABLE {_quote(table)} ({columns}, PRIMARY KEY ({primary_key})) "
-            "WITHOUT ROWID"
+            f"SET memory_limit = {_sql_literal(f'{self.compaction_memory_mb}MB')}"
         )
+        connection.execute(f"SET threads = {self.compaction_threads}")
+        connection.execute(f"SET temp_directory = {_sql_literal(str(temporary))}")
+        connection.execute("SET preserve_insertion_order = false")
 
-    def _load_existing(
+    def _compact_date(
         self,
-        connection: sqlite3.Connection,
-        table: str,
+        connection: duckdb.DuckDBPyConnection,
         target_date: date,
-    ) -> None:
-        path = self.layout.normalized_path(
-            self.dataset,
-            target_date,
-            account_alias=self.account_alias,
-        )
-        if not path.exists():
-            return
-        parquet = pq.ParquetFile(path)
-        for batch in parquet.iter_batches(batch_size=self.batch_rows):
-            frame = canonicalize(pl.from_arrow(batch), self.schema)
-            self._insert_frame(connection, table, frame)
-
-    def _insert_frame(
-        self,
-        connection: sqlite3.Connection,
-        table: str,
-        frame: pl.DataFrame,
-    ) -> None:
-        placeholders = ", ".join("?" for _ in self.schema)
-        columns = ", ".join(_quote(name) for name in self.schema)
-        statement = (
-            f"INSERT OR REPLACE INTO {_quote(table)} ({columns}) VALUES ({placeholders})"
-        )
-        dtypes = tuple(self.schema.values())
-        rows = (
-            tuple(_to_sqlite(value, dtype) for value, dtype in zip(row, dtypes, strict=True))
-            for row in frame.iter_rows()
-        )
-        connection.executemany(statement, rows)
-
-    def _write_table(
-        self,
-        connection: sqlite3.Connection,
-        table: str,
-        target_date: date,
+        fragments: list[Path],
     ) -> tuple[date, Path, int]:
         path = self.layout.normalized_path(
             self.dataset,
             target_date,
             account_alias=self.account_alias,
         )
-        order_by = ", ".join(_quote(name) for name in self.sort_columns)
         columns = ", ".join(_quote(name) for name in self.schema)
-        count = int(
-            connection.execute(f"SELECT COUNT(*) FROM {_quote(table)}").fetchone()[0]
-        )
+        primary_key = ", ".join(_quote(name) for name in self.primary_key)
+        order_by = ", ".join(_quote(name) for name in self.sort_columns)
+        fragment_paths = ", ".join(_sql_literal(str(item)) for item in fragments)
+        sources = [
+            (
+                f"SELECT {columns}, \"__source_order\" "
+                f"FROM read_parquet([{fragment_paths}], union_by_name=true)"
+            )
+        ]
+        if path.exists():
+            sources.insert(
+                0,
+                (
+                    f"SELECT {columns}, 0::BIGINT AS \"__source_order\" "
+                    f"FROM read_parquet({_sql_literal(str(path))})"
+                ),
+            )
+        union = " UNION ALL ".join(sources)
+        query = f"""
+            SELECT {columns}
+            FROM (
+                SELECT {columns},
+                       ROW_NUMBER() OVER (
+                           PARTITION BY {primary_key}
+                           ORDER BY "__source_order" DESC
+                       ) AS "__row_number"
+                FROM ({union}) AS source
+            ) AS ranked
+            WHERE "__row_number" = 1
+            ORDER BY {order_by}
+        """
         metadata = {
             b"dataset_kind": b"offline",
             b"dataset": self.dataset.encode(),
             b"source_name": self.source_name.encode(),
             b"schema_version": b"1",
             b"written_at": datetime.now(UTC).isoformat().encode(),
-            b"compaction": b"sqlite_streaming",
+            b"compaction": b"duckdb_external_sort",
         }
         arrow_schema = (
             pl.DataFrame(schema=self.schema).to_arrow().schema.with_metadata(metadata)
         )
+        output_batch_rows = min(
+            max(self.batch_rows, 25_000),
+            min(self.row_group_size, 100_000),
+        )
+        count = 0
         with self._lock(path):
             temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
             writer: pq.ParquetWriter | None = None
@@ -369,19 +377,19 @@ class StreamingDailyParquetRepository(DailyParquetRepository):
                     compression=self.compression,
                     write_statistics=True,
                 )
-                cursor = connection.execute(
-                    f"SELECT {columns} FROM {_quote(table)} ORDER BY {order_by}"
+                reader = connection.execute(query).to_arrow_reader(
+                    batch_size=output_batch_rows
                 )
-                while rows := cursor.fetchmany(self.batch_rows):
-                    arrays = []
-                    for index, field in enumerate(arrow_schema):
-                        dtype = self.schema[field.name]
-                        values = [_from_sqlite(row[index], dtype) for row in rows]
-                        arrays.append(pa.array(values, type=field.type))
+                for batch in reader:
+                    table = pa.Table.from_batches([batch]).cast(
+                        arrow_schema.remove_metadata()
+                    )
+                    table = table.replace_schema_metadata(metadata)
                     writer.write_table(
-                        pa.Table.from_arrays(arrays, schema=arrow_schema),
+                        table,
                         row_group_size=self.row_group_size,
                     )
+                    count += table.num_rows
                 writer.close()
                 writer = None
                 pq.read_metadata(temporary)
@@ -393,66 +401,12 @@ class StreamingDailyParquetRepository(DailyParquetRepository):
         return target_date, path, count
 
 
-def _date_table(target_date: date) -> str:
-    return f"rows_{target_date:%Y%m%d}"
-
-
 def _quote(identifier: str) -> str:
     return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
 
 
-def _sqlite_type(dtype: pl.DataType) -> str:
-    if isinstance(dtype, (pl.Datetime, pl.Duration)):
-        return "INTEGER"
-    if dtype == pl.Date:
-        return "TEXT"
-    if isinstance(dtype, pl.Decimal):
-        return "TEXT"
-    if dtype in {
-        pl.Int8,
-        pl.Int16,
-        pl.Int32,
-        pl.Int64,
-        pl.UInt8,
-        pl.UInt16,
-        pl.UInt32,
-        pl.UInt64,
-        pl.Boolean,
-    }:
-        return "INTEGER"
-    if dtype in {pl.Float32, pl.Float64}:
-        return "REAL"
-    return "TEXT"
-
-
-def _to_sqlite(value: object, dtype: pl.DataType) -> object:
-    if value is None:
-        return None
-    if isinstance(dtype, pl.Datetime):
-        if isinstance(value, datetime):
-            return int(value.timestamp() * 1000)
-        return int(value)
-    if dtype == pl.Date:
-        return value.isoformat() if isinstance(value, date) else str(value)
-    if isinstance(dtype, pl.Decimal):
-        return str(value)
-    if dtype == pl.Boolean:
-        return int(bool(value))
-    return value
-
-
-def _from_sqlite(value: object, dtype: pl.DataType) -> object:
-    if value is None:
-        return None
-    if isinstance(dtype, pl.Datetime):
-        return datetime.fromtimestamp(int(value) / 1000, tz=UTC)
-    if dtype == pl.Date:
-        return date.fromisoformat(str(value))
-    if isinstance(dtype, pl.Decimal):
-        return Decimal(str(value))
-    if dtype == pl.Boolean:
-        return bool(value)
-    return value
+def _sql_literal(value: str) -> str:
+    return f"'{value.replace(chr(39), chr(39) * 2)}'"
 
 
 def write_run_report(layout: OfflineLayout, run_id: str, report: Mapping[str, Any]) -> Path:

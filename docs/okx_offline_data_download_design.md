@@ -195,17 +195,18 @@ OKX 模块 1、2、3、11 的“日”按 UTC+8 解释；订单簿模块 4、5�
 1. 各合约/币种的 Raw 文件或 REST 响应先独立下载；
 2. ZIP 成员直接通过 `ZipExtFile + csv.DictReader` 流式读取，不把解压内容整体载入
    内存；
-3. 每 `stream_batch_rows` 行规范化一次，并写入位于数据盘 `.staging` 目录的临时
-   SQLite 表；
-4. SQLite 使用业务主键去重，依靠磁盘 B-tree 完成外部排序；
+3. 每 `stream_batch_rows` 行规范化一次，并批量写入数据盘 `.staging` 目录的临时
+   Parquet fragment；
+4. DuckDB 在 `compaction_memory_mb` 内存上限内使用业务主键去重，超出内存的排序
+   自动 spill 到 `.staging` 数据盘；
 5. 按排序游标每批读取固定行数，通过 `PyArrow ParquetWriter` 写入日级临时文件；
 6. 校验行数、主键、时间范围和 Parquet footer；
 7. 使用 `os.replace` 原子替换正式日文件；
-8. 删除可重建的临时 SQLite，Raw 文件继续永久保留。
+8. 删除可重建的 fragment 和 DuckDB 临时文件，Raw 文件继续永久保留。
 
-不允许把所有合约数据一次性加载进内存。SQLite 设置 `temp_store=FILE` 和有限
-cache；已有日文件也使用 Parquet record batch 重新摄入。默认每批 25,000 行、
-SQLite cache 64 MiB，可在 2 GiB 服务器上进一步调低。
+不允许把所有合约数据一次性加载进内存。已有日文件由 DuckDB 直接扫描，不经过
+Python 逐行转换；最终排序结果通过 Arrow record batch 写入。默认每批 25,000 行、
+DuckDB 内存上限 512 MiB、2 个线程，2 GiB 服务器可调低到 384 MiB。
 
 逐笔和 L2 不执行全市场 compaction。解析器按
 `dataset + UTC date + instrument_id` 输出临时 fragment；同一输出键的 fragment

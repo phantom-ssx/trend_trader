@@ -132,7 +132,9 @@ class OfflineSyncConfig(BaseModel):
     parquet_compression: str = "zstd"
     parquet_row_group_size: int = Field(default=1_000_000, ge=10_000)
     stream_batch_rows: int = Field(default=25_000, ge=1_000, le=250_000)
-    sqlite_cache_mb: int = Field(default=64, ge=16, le=512)
+    compaction_memory_mb: int = Field(default=512, ge=128, le=8192)
+    compaction_threads: int = Field(default=2, ge=1, le=16)
+    sqlite_cache_mb: int | None = Field(default=None, ge=16, le=512, exclude=True)
     raw_retention: str = "permanent"
 
     @field_validator("okx_base_url", "historical_page_base_url")
@@ -149,6 +151,8 @@ class OfflineSyncConfig(BaseModel):
         aliases = [account.alias for account in self.private_accounts]
         if len(aliases) != len(set(aliases)):
             raise ValueError("private account aliases must be unique")
+        if self.sqlite_cache_mb is not None and "compaction_memory_mb" not in self.model_fields_set:
+            self.compaction_memory_mb = max(128, min(self.sqlite_cache_mb * 8, 4096))
         return self
 
     @property
