@@ -1,0 +1,11 @@
+[Unit]
+Description=Run OKX offline data synchronization four times daily
+
+[Timer]
+OnCalendar=*-*-* 02,08,14,20:30:00 UTC
+Persistent=true
+RandomizedDelaySec=5m
+Unit=trend-trader-offline-sync.service
+
+[Install]
+WantedBy=timers.target

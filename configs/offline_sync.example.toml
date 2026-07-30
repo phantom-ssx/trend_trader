@@ -1,0 +1,70 @@
+data_root = "/data/market/v1"
+okx_base_url = "https://www.okx.com"
+historical_page_base_url = "https://www.okx.com"
+requests_per_second = 3.0
+request_timeout_seconds = 30.0
+max_retries = 5
+daily_history_days_per_run = 14
+min_free_disk_ratio = 0.20
+parquet_compression = "zstd"
+parquet_row_group_size = 1000000
+raw_retention = "permanent"
+
+[datasets.candles]
+enabled = true
+start = 2023-07-01
+mature_lag_days = 2
+
+[datasets.funding_rates]
+enabled = true
+start = 2022-03-01
+mature_lag_days = 2
+
+[datasets.mark_price_candles]
+enabled = true
+start = 2020-01-02
+
+[datasets.index_price_candles]
+enabled = true
+start = 2020-01-02
+
+[datasets.aggregate_open_interest]
+enabled = true
+periods = ["5m", "1H", "1D"]
+
+[datasets.taker_volume]
+enabled = true
+start = 2024-02-01
+periods = ["5m"]
+
+[datasets.long_short_ratio]
+enabled = true
+start = 2024-02-01
+periods = ["5m"]
+
+[datasets.private_final_orders]
+enabled = true
+
+[datasets.private_fills]
+enabled = true
+
+[datasets.private_bills]
+enabled = true
+
+# 第一阶段强制关闭；即使误改为 true，配置校验也会拒绝启动。
+[datasets.public_trades]
+enabled = false
+start = 2021-09-01
+mature_lag_days = 2
+
+[datasets.order_book_l2]
+enabled = false
+start = 2023-03-01
+mature_lag_days = 3
+
+# 每个实际参与交易的主/子账户增加一段。密钥值只放 systemd EnvironmentFile。
+# [[private_accounts]]
+# alias = "main"
+# api_key_env = "OKX_MAIN_API_KEY"
+# secret_key_env = "OKX_MAIN_SECRET_KEY"
+# passphrase_env = "OKX_MAIN_PASSPHRASE"

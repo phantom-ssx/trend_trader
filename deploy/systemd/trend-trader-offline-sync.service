@@ -1,0 +1,27 @@
+[Unit]
+Description=Trend Trader OKX offline data synchronization
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/data/market/v1/offline
+
+[Service]
+Type=oneshot
+User=trend-trader
+Group=trend-trader
+WorkingDirectory=/opt/trend-trader
+EnvironmentFile=/etc/trend-trader/offline-sync.env
+ExecStart=/opt/trend-trader/.venv/bin/trend-trader-offline-sync --config /etc/trend-trader/offline-sync.toml daily
+ExecStopPost=/opt/trend-trader/.venv/bin/trend-trader-offline-notify --config /etc/trend-trader/offline-sync.toml
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+TimeoutStartSec=infinity
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/data/market/v1/offline
+
+[Install]
+WantedBy=multi-user.target
