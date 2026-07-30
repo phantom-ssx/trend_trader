@@ -187,6 +187,69 @@ uv run trend-trader-open-interest-collector \
 `instrument_family`、`base_currency`、到期时间或合约类型筛选，不依赖解析
 `instrument_id`。
 
+## 实时记录 OKX 合约多空比
+
+`trend-trader-long-short-ratio-collector` 通过 OKX Rubik 公共 REST 接口读取
+单合约的三类多空比，按交易所原生 5 分钟周期写入
+`long_short_ratio_snapshot`：
+
+| `ratio_type` | OKX endpoint | 含义 |
+| --- | --- | --- |
+| `all_account` | `long-short-account-ratio-contract` | 全市场多头账户数 / 空头账户数 |
+| `top_trader_account` | `long-short-account-ratio-contract-top-trader` | 大户多头账户数 / 空头账户数 |
+| `top_trader_position` | `long-short-position-ratio-contract-top-trader` | 大户多头持仓价值 / 空头持仓价值 |
+
+采集器在每个 UTC 5 分钟边界轮询；live 合约列表每小时刷新。数据时效按 OKX 返回的
+`exchange_ts` 判断，而不是按本地请求时间判断，避免接口停止更新时仍被误标为
+`fresh`。
+
+默认同时记录 `SWAP`、`FUTURES` 和全部三类指标：
+
+```bash
+uv run trend-trader-long-short-ratio-collector \
+  --data-root /data/market/v1
+```
+
+单合约 REST 冒烟测试：
+
+```bash
+uv run trend-trader-long-short-ratio-collector \
+  --once \
+  --instrument-id BTC-USDT-SWAP \
+  --data-root data/market/v1
+```
+
+可用重复的 `--ratio-type` 只采集指定类别：
+
+```bash
+uv run trend-trader-long-short-ratio-collector \
+  --ratio-type all_account \
+  --ratio-type top_trader_position \
+  --data-root /data/market/v1
+```
+
+文件结构为：
+
+```text
+/data/market/v1/
+└── long_short_ratio_snapshot/
+    └── year=2026/
+        └── date=2026-07-29/
+            └── long_short_ratio_snapshot-2026-07-29.parquet
+```
+
+5 分钟快照字段：
+
+`venue, instrument_id, instrument_type, instrument_family, base_currency,`
+`settle_currency, contract_type, expiration_time, snapshot_time, exchange_ts,`
+`received_at, bar_type, ratio_type, long_short_ratio, data_source, data_status`
+
+主键为 `venue, instrument_id, ratio_type, snapshot_time`；同一类别的同一截面重复
+写入会保留最后一次结果。旧版文件没有 `ratio_type` 时会自动按 `all_account`
+读取和迁移。
+`long_short_ratio_snapshot` 保存完整采集截面和审计元数据。统一查询 API 中已有的
+`long_short_ratio` 仍是精简的研究数据集，两者不会自动混合。
+
 ## 统一数据查询 API
 
 上层代码可以通过同一个 `MarketDataClient` 查询不同数据集。时间范围统一为 UTC
