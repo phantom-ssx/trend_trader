@@ -947,6 +947,116 @@ def test_pre_archive_candles_use_rest_and_active_instrument_windows(tmp_path: Pa
     assert len(raw_files) == 1
 
 
+def test_pre_archive_candles_use_first_seen_when_listing_time_is_unknown(
+    tmp_path: Path,
+) -> None:
+    target = date(2020, 1, 2)
+    config = _config(tmp_path)
+    config.datasets.candles.enabled = True
+    requested: list[str] = []
+
+    class FakeRestClient:
+        async def __aenter__(self) -> FakeRestClient:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def fetch_instruments(self) -> list[dict[str, object]]:
+            return []
+
+        async def fetch_candles(
+            self,
+            *,
+            instrument_id: str,
+            start_ms: int,
+            end_ms: int,
+        ) -> list[list[object]]:
+            requested.append(instrument_id)
+            return []
+
+    synchronizer = OfflineSynchronizer(config, client_factory=FakeRestClient)
+    synchronizer.catalog.upsert_instrument(
+        {
+            "instrument_id": "BTC-USD-260731",
+            "instrument_type": "FUTURES",
+            "base_currency": "BTC",
+        },
+        datetime(2026, 7, 27, tzinfo=UTC),
+    )
+    synchronizer._check_disk = lambda: None
+    report = asyncio.run(
+        synchronizer.run(
+            mode="range",
+            start=target,
+            end=target,
+            datasets={"candles"},
+            today=target + timedelta(days=2),
+        )
+    )
+
+    assert report["status"] == "success", json.dumps(report, indent=2)
+    assert requested == []
+
+
+def test_settled_contract_error_does_not_fail_candle_day(tmp_path: Path) -> None:
+    target = date(2020, 1, 2)
+    config = _config(tmp_path)
+    config.datasets.candles.enabled = True
+    timestamp = int(datetime(2020, 1, 2, tzinfo=UTC).timestamp() * 1000)
+    requested: list[str] = []
+
+    class FakeRestClient:
+        async def __aenter__(self) -> FakeRestClient:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def fetch_instruments(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "instId": "BTC-USD-200103",
+                    "instType": "FUTURES",
+                    "baseCcy": "BTC",
+                    "listTime": str(timestamp - 86_400_000),
+                    "expTime": str(timestamp + 86_400_000),
+                }
+            ]
+
+        async def fetch_candles(
+            self,
+            *,
+            instrument_id: str,
+            start_ms: int,
+            end_ms: int,
+        ) -> list[list[object]]:
+            requested.append(instrument_id)
+            raise OkxApiError(
+                "OKX API /api/v5/market/history-candles: 50047 settled",
+                code="50047",
+                retryable=False,
+            )
+
+    synchronizer = OfflineSynchronizer(config, client_factory=FakeRestClient)
+    synchronizer._check_disk = lambda: None
+    first = asyncio.run(
+        synchronizer.run(
+            mode="range",
+            start=target,
+            end=target,
+            datasets={"candles"},
+            today=target + timedelta(days=2),
+        )
+    )
+
+    assert first["status"] == "success", json.dumps(first, indent=2)
+    assert requested == ["BTC-USD-200103"]
+    invalid = synchronizer.catalog.invalid_identifier_summary()
+    assert invalid[0]["identifier"] == "BTC-USD-200103"
+    assert invalid[0]["error_code"] == "50047"
+
+
 def test_rest_archive_overlap_must_have_identical_candles(tmp_path: Path) -> None:
     timestamp = int(datetime(2023, 6, 30, 23, 59, tzinfo=UTC).timestamp() * 1000)
     rest = candle_frame(

@@ -64,7 +64,11 @@ RATIO_STARTS = {
     "top_trader_position": date(2024, 3, 22),
 }
 RATIO_TYPES = tuple(RATIO_PATHS)
-PERMANENT_IDENTIFIER_ERROR_CODES = {"51001"}
+# 51001 means the identifier is not accepted by the endpoint. 50047 is returned
+# for a settled dated contract even when querying candles from its active period;
+# OKX directs callers to another contract instead, so retrying the same identifier
+# cannot succeed.
+PERMANENT_IDENTIFIER_ERROR_CODES = {"50047", "51001"}
 
 
 @dataclass(frozen=True)
@@ -1328,6 +1332,12 @@ def _instrument_active_on_date(row: Mapping[str, object], target_date: date) -> 
     start = datetime.combine(target_date, time.min, tzinfo=UTC)
     end = start + timedelta(days=1)
     listing_time = _optional_datetime(row.get("listing_time"))
+    # Instruments learned from an offline archive do not carry OKX listTime.
+    # Treat the first date on which we actually observed them as a conservative
+    # lower bound; otherwise a newly observed dated future would be queried for
+    # every earlier backfill day.
+    if listing_time is None and str(row.get("instrument_type") or "").upper() == "FUTURES":
+        listing_time = _optional_datetime(row.get("first_seen"))
     expiration_time = _optional_datetime(row.get("expiration_time"))
     return (listing_time is None or listing_time < end) and (
         expiration_time is None or expiration_time > start
