@@ -136,6 +136,13 @@ class OfflineSyncConfig(BaseModel):
     compaction_threads: int = Field(default=2, ge=1, le=16)
     sqlite_cache_mb: int | None = Field(default=None, ge=16, le=512, exclude=True)
     raw_retention: str = "permanent"
+    discover_historical_indices: bool = True
+    historical_index_ids: tuple[str, ...] = (
+        "BSV-USD",
+        "BSV-USDT",
+        "EOS-USD",
+        "EOS-USDT",
+    )
 
     @field_validator("okx_base_url", "historical_page_base_url")
     @classmethod
@@ -143,6 +150,24 @@ class OfflineSyncConfig(BaseModel):
         if not value.startswith(("http://", "https://")):
             raise ValueError("base URLs must start with http:// or https://")
         return value.rstrip("/")
+
+    @field_validator("historical_index_ids")
+    @classmethod
+    def validate_historical_index_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(item.strip().upper() for item in value)
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("historical_index_ids must be unique")
+        allowed_quotes = {"USD", "USDT", "USDC", "BTC"}
+        for identifier in normalized:
+            parts = identifier.rsplit("-", maxsplit=1)
+            if (
+                len(parts) != 2
+                or not parts[0]
+                or parts[1] not in allowed_quotes
+                or any(not (character.isalnum() or character == "_") for character in parts[0])
+            ):
+                raise ValueError(f"invalid historical index ID: {identifier}")
+        return normalized
 
     @model_validator(mode="after")
     def validate_contract(self) -> OfflineSyncConfig:

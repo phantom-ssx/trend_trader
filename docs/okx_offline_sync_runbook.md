@@ -150,11 +150,60 @@ journalctl -u trend-trader-offline-sync.service -n 200 --no-pager
 缓存命中的跳过次数。未上市合约不在此列表中：程序按 `listTime` 逐日判断，上市前
 跳过、上市日开始请求。合约元数据变化会使旧排除记录自动失效并触发重新探测。
 
+## 6. 补偿早期缺失的指数币种
+
+旧版本只从当前合约目录生成指数 universe，因此 2020 年分区会漏掉后来下架合约所
+使用的 `EOS-USD`、`EOS-USDT`、`BSV-USD` 和 `BSV-USDT`。新版默认将它们加入
+`historical_index_ids`。如果服务器 TOML 希望显式固定该配置，在顶层加入：
+
+```toml
+historical_index_ids = ["BSV-USD", "BSV-USDT", "EOS-USD", "EOS-USDT"]
+discover_historical_indices = true
+```
+
+先用一天验证。即使该日期原 coverage 已经是 complete，带 `--identifier` 的 range
+也会按 identifier coverage 执行，并把新增行合并到原 Parquet：
+
+```bash
+sudo -u trader /opt/trend-trader/.venv/bin/trend-trader-offline-sync \
+  --config /etc/trend-trader/offline-sync.toml range \
+  --start 2020-02-10 --end 2020-02-10 \
+  --dataset index_price_candles \
+  --identifier EOS-USD --identifier EOS-USDT \
+  --identifier BSV-USD --identifier BSV-USDT
+```
+
+验证无误后直接重新启动原有 backfill service：
+
+```bash
+sudo systemctl stop trend-trader-offline-sync.timer
+sudo systemctl start trend-trader-offline-backfill.service
+sudo journalctl -fu trend-trader-offline-backfill.service
+```
+
+查看可续跑进度：
+
+```bash
+sudo -u trader /opt/trend-trader/.venv/bin/trend-trader-offline-sync \
+  --config /etc/trend-trader/offline-sync.toml compensation-status
+```
+
+原有 `backfill` 会同时检查日期级 coverage 和历史补充指数的 identifier coverage：旧日期
+即使已经是 complete，只要缺少某个补充指数，仍会生成仅包含该指数的补偿任务。
+SQLite 对每个指数和日期记录 `complete` 或 `unavailable`，所以停止或异常退出后再次
+启动同一个 backfill service 只处理缺口。补偿完成后再启动
+`trend-trader-offline-sync.timer`。
+
+第一次使用新版 backfill 时，会在 `index_price_candles.start` 当天对 OKX 当前指数列表
+做一次历史存在性扫描。候选通常较多，前几分钟可能只看到
+`discover-index-universe` 进度而尚未开始日级任务；扫描结果和完成标记写入 SQLite，
+后续重启不会重复扫描。
+
 私有 API 只能自动回补近 3 个月。更早的最终订单、成交和账单，需要从 OKX 网页生成
 2021-01-28 以来的 Trading history 报表；这部分是一次性人工导出流程，不应把网页登录
 凭证交给定时下载程序。
 
-## 6. 小内存服务器与 OOM
+## 7. 小内存服务器与 OOM
 
 `2023-07-01` 起的历史 K 线和资金费率使用有界内存流程：ZIP 原始文本行先以常量内存折叠连续完全
 重复行，再进行 CSV 解析并按固定批次写临时 Parquet fragment；DuckDB 在固定内存
@@ -199,7 +248,7 @@ sudo -u trader find /data/market/v1/offline/.staging \
   -mindepth 1 -depth -delete
 ```
 
-## 7. 从 SQLite compactor 版本升级
+## 8. 从 SQLite compactor 版本升级
 
 先停止仍在运行的旧回补任务，再更新代码和依赖：
 

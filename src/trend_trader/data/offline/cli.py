@@ -30,16 +30,24 @@ def build_parser() -> argparse.ArgumentParser:
     range_parser.add_argument("--start", type=date.fromisoformat, required=True)
     range_parser.add_argument("--end", type=date.fromisoformat, required=True)
     range_parser.add_argument("--dataset", action="append", default=[])
+    range_parser.add_argument("--identifier", action="append", default=[])
+
+    compensation_parser = subparsers.add_parser("compensate-index")
+    compensation_parser.add_argument("--start", type=date.fromisoformat)
+    compensation_parser.add_argument("--end", type=date.fromisoformat)
+    compensation_parser.add_argument("--identifier", action="append", default=[])
 
     plan_parser = subparsers.add_parser("plan")
     plan_parser.add_argument("--mode", choices=("daily", "backfill", "range"), default="daily")
     plan_parser.add_argument("--start", type=date.fromisoformat)
     plan_parser.add_argument("--end", type=date.fromisoformat)
     plan_parser.add_argument("--dataset", action="append", default=[])
+    plan_parser.add_argument("--identifier", action="append", default=[])
 
     subparsers.add_parser("status")
     subparsers.add_parser("availability")
     subparsers.add_parser("invalid-identifiers")
+    subparsers.add_parser("compensation-status")
     subparsers.add_parser("notify")
     return parser
 
@@ -71,13 +79,28 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+    if args.command == "compensation-status":
+        print(
+            json.dumps(
+                synchronizer.catalog.identifier_coverage_summary(),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
     if args.command == "notify":
         return min(send_pending_notifications(synchronizer.catalog), 1)
 
     datasets = set(args.dataset) or None
+    identifiers = set(getattr(args, "identifier", [])) or None
     start = getattr(args, "start", None)
     end = getattr(args, "end", None)
     mode = getattr(args, "mode", args.command)
+    if args.command == "compensate-index":
+        datasets = {"index_price_candles"}
+        identifiers = identifiers or set(config.historical_index_ids)
+        start = start or config.datasets.index_price_candles.start
+        mode = "range"
     if start and end and start > end:
         raise SystemExit("--start must be on or before --end")
 
@@ -87,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
             start=start,
             end=end,
             datasets=datasets,
+            identifiers=identifiers,
         )
         print(
             json.dumps(
@@ -95,6 +119,7 @@ def main(argv: list[str] | None = None) -> int:
                         "dataset": task.dataset,
                         "date": task.target_date.isoformat(),
                         "scope": task.scope_key,
+                        "identifiers": list(task.identifiers),
                     }
                     for task in tasks
                 ],
@@ -106,10 +131,11 @@ def main(argv: list[str] | None = None) -> int:
 
     report: dict[str, Any] = asyncio.run(
         synchronizer.run(
-            mode=args.command,
+            mode=mode,
             start=start,
             end=end,
             datasets=datasets,
+            identifiers=identifiers,
         )
     )
     print(json.dumps(report, ensure_ascii=False, indent=2, default=str))

@@ -116,6 +116,27 @@ class OfflineCatalog:
                     skip_count INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (dataset, identifier)
                 );
+                CREATE TABLE IF NOT EXISTS identifier_coverage (
+                    dataset TEXT NOT NULL,
+                    identifier TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    row_count INTEGER NOT NULL DEFAULT 0,
+                    artifact_path TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (dataset, identifier, date)
+                );
+                CREATE TABLE IF NOT EXISTS historical_indices (
+                    identifier TEXT PRIMARY KEY,
+                    first_observed_date TEXT NOT NULL,
+                    discovery_method TEXT NOT NULL,
+                    discovered_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS discovery_state (
+                    discovery_key TEXT PRIMARY KEY,
+                    completed_at TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL
+                );
                 """
             )
 
@@ -201,6 +222,44 @@ class OfflineCatalog:
             )
         )
 
+    def is_identifier_resolved(
+        self,
+        dataset: str,
+        identifier: str,
+        target_date: date,
+    ) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT status FROM identifier_coverage
+                WHERE dataset=? AND identifier=? AND date=?
+                """,
+                (dataset, identifier, target_date.isoformat()),
+            ).fetchone()
+        return bool(
+            row
+            and (
+                str(row["status"]).startswith("complete")
+                or str(row["status"]) == "unavailable"
+            )
+        )
+
+    def coverage_record(
+        self,
+        dataset: str,
+        target_date: date,
+        scope_key: str = "all",
+    ) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM coverage
+                WHERE dataset=? AND scope_key=? AND date=?
+                """,
+                (dataset, scope_key, target_date.isoformat()),
+            ).fetchone()
+        return dict(row) if row else None
+
     def mark_coverage(
         self,
         dataset: str,
@@ -235,6 +294,124 @@ class OfflineCatalog:
                     artifact_path,
                     source_sha256,
                     utc_now_text(),
+                ),
+            )
+
+    def mark_identifier_coverage(
+        self,
+        dataset: str,
+        identifier: str,
+        target_date: date,
+        *,
+        status: str,
+        row_count: int,
+        artifact_path: str | None = None,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO identifier_coverage(
+                    dataset, identifier, date, status, row_count,
+                    artifact_path, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(dataset, identifier, date) DO UPDATE SET
+                    status=excluded.status,
+                    row_count=excluded.row_count,
+                    artifact_path=excluded.artifact_path,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    dataset,
+                    identifier,
+                    target_date.isoformat(),
+                    status,
+                    row_count,
+                    artifact_path,
+                    utc_now_text(),
+                ),
+            )
+
+    def identifier_coverage_summary(self) -> list[dict[str, object]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT dataset, identifier, MIN(date) AS start_date,
+                       MAX(date) AS end_date, COUNT(*) AS partitions,
+                       SUM(row_count) AS rows
+                FROM identifier_coverage
+                WHERE status LIKE 'complete%'
+                GROUP BY dataset, identifier
+                ORDER BY dataset, identifier
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def upsert_historical_index(
+        self,
+        identifier: str,
+        first_observed_date: date,
+        *,
+        discovery_method: str,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO historical_indices(
+                    identifier, first_observed_date, discovery_method, discovered_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(identifier) DO UPDATE SET
+                    first_observed_date=MIN(
+                        historical_indices.first_observed_date,
+                        excluded.first_observed_date
+                    ),
+                    discovery_method=excluded.discovery_method,
+                    discovered_at=excluded.discovered_at
+                """,
+                (
+                    identifier,
+                    first_observed_date.isoformat(),
+                    discovery_method,
+                    utc_now_text(),
+                ),
+            )
+
+    def historical_indices(self) -> list[dict[str, object]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT identifier, first_observed_date, discovery_method, discovered_at
+                FROM historical_indices
+                ORDER BY identifier
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def discovery_completed(self, discovery_key: str) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM discovery_state WHERE discovery_key=?",
+                (discovery_key,),
+            ).fetchone()
+        return row is not None
+
+    def mark_discovery_completed(
+        self,
+        discovery_key: str,
+        metadata: Mapping[str, Any],
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO discovery_state(discovery_key, completed_at, metadata_json)
+                VALUES (?, ?, ?)
+                ON CONFLICT(discovery_key) DO UPDATE SET
+                    completed_at=excluded.completed_at,
+                    metadata_json=excluded.metadata_json
+                """,
+                (
+                    discovery_key,
+                    utc_now_text(),
+                    json.dumps(dict(metadata), sort_keys=True, default=str),
                 ),
             )
 

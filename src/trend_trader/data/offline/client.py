@@ -25,6 +25,7 @@ INSTRUMENTS_PATH = "/api/v5/public/instruments"
 CANDLES_PATH = "/api/v5/market/history-candles"
 MARK_CANDLES_PATH = "/api/v5/market/history-mark-price-candles"
 INDEX_CANDLES_PATH = "/api/v5/market/history-index-candles"
+INDEX_TICKERS_PATH = "/api/v5/market/index-tickers"
 OPEN_INTEREST_PATH = "/api/v5/rubik/stat/contracts/open-interest-volume"
 TAKER_VOLUME_PATH = "/api/v5/rubik/stat/taker-volume-contract"
 RATIO_PATHS = {
@@ -188,6 +189,46 @@ class OkxOfflineClient:
                     continue
                 result.append(item)
         return result
+
+    async def fetch_index_ids(self) -> list[str]:
+        identifiers: set[str] = set()
+        for quote_currency in ("USD", "USDT", "USDC", "BTC"):
+            payload = await self.request(
+                "GET",
+                INDEX_TICKERS_PATH,
+                params={"quoteCcy": quote_currency},
+            )
+            data = payload.get("data", [])
+            if not isinstance(data, list):
+                continue
+            identifiers.update(
+                str(item.get("instId") or "")
+                for item in data
+                if isinstance(item, dict) and item.get("instId")
+            )
+        return sorted(identifiers)
+
+    async def index_has_candles_on_date(
+        self,
+        instrument_id: str,
+        target_date: date,
+    ) -> bool:
+        start = datetime.combine(target_date, time.min, tzinfo=UTC)
+        end = start + timedelta(days=1)
+        start_ms = int(start.timestamp() * 1000)
+        end_ms = int(end.timestamp() * 1000)
+        payload = await self.request(
+            "GET",
+            INDEX_CANDLES_PATH,
+            params={
+                "instId": instrument_id,
+                "bar": "1m",
+                "after": end_ms,
+                "limit": 1,
+            },
+        )
+        rows = _array_rows(payload)
+        return any(start_ms <= int(str(row[0])) < end_ms for row in rows)
 
     async def historical_links(
         self,

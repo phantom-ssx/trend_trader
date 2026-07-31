@@ -11,6 +11,11 @@ stream_batch_rows = 25000
 compaction_memory_mb = 512
 compaction_threads = 2
 raw_retention = "permanent"
+discover_historical_indices = true
+
+# 当前合约目录已不再返回、但历史上服务于合约的指数。程序会把这些指数加入每日
+# 指数价下载；补偿旧分区时可通过 range --identifier 精确合并，避免重下其他币种。
+historical_index_ids = ["BSV-USD", "BSV-USDT", "EOS-USD", "EOS-USDT"]
 
 [datasets.candles]
 enabled = true

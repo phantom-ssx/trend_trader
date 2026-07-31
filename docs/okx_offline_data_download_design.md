@@ -392,6 +392,17 @@ Raw 文件保留 `instId, action, asks, bids, ts` 原始结构。Normalized 层�
 
 多个合约可引用同一个 `index_id`，因此指数数据只下载一次，不按合约重复保存。
 
+指数 universe 不能只取当前合约接口：OKX 会从 instruments 接口移除已下架合约，
+但对应指数历史仍可能可查。实际 universe 使用以下并集：当前衍生品的官方 `uly`、
+历史文件解析时发现的合约所映射的指数，以及配置项 `historical_index_ids` 中经过
+历史接口验证的早期下架合约指数。默认补充 `EOS/BSV × USD/USDT`；该列表是可审计
+配置，不把 OKX index-tickers 中大量与合约无关的现货、股票类指数混入合约研究集。
+
+首次新版 backfill 还会执行一次自动对账：从 OKX index-tickers 取得 USD、USDT、
+USDC、BTC 四类当前指数，排除配置起点当天已被合约 `uly` 或补充表覆盖的标识，再对
+其余候选做单页历史 K 线探测。起点当天确有数据的指数写入 `historical_indices`；探测
+完成标记持久化到 `discovery_state`，以后重启不重复扫描。
+
 ### 4.7 聚合 OI 与成交量 `aggregate_open_interest`
 
 来源：`GET /api/v5/rubik/stat/contracts/open-interest-volume`。
@@ -847,6 +858,10 @@ run_id: 20260730T023000Z-a13f
 `instId` 必须直接使用 instruments API 返回的 `uly`，不能从合约名截取。只有已经
 进入有效时间窗、OKX 仍明确返回 `51001`（标识不存在）时才缓存排除；限频、系统
 繁忙、HTTP 和网络错误继续按重试策略处理，不写入排除表。
+
+历史 universe 扩展后的补偿按 `dataset, identifier, date` 单独记录 coverage。补偿任务
+只请求新增指数，并用日级主键原子合并现有 Parquet；不会重新下载或删除文件中已有
+的指数。中断重启时已经完成的“指数 × 日期”自动跳过。
 
 ### 7.4 告警
 

@@ -43,6 +43,8 @@ def _config(tmp_path: Path) -> OfflineSyncConfig:
         data_root=tmp_path,
         requests_per_second=100_000,
         daily_history_days_per_run=14,
+        historical_index_ids=(),
+        discover_historical_indices=False,
     )
     for name in type(config.datasets).model_fields:
         getattr(config.datasets, name).enabled = False
@@ -52,6 +54,86 @@ def _config(tmp_path: Path) -> OfflineSyncConfig:
 def test_deferred_large_datasets_cannot_be_enabled() -> None:
     with pytest.raises(ValueError, match="deferred"):
         DatasetsConfig(public_trades=DatasetOptions(enabled=True))
+
+
+def test_default_historical_index_ids_cover_verified_legacy_contracts() -> None:
+    config = OfflineSyncConfig()
+
+    assert config.historical_index_ids == (
+        "BSV-USD",
+        "BSV-USDT",
+        "EOS-USD",
+        "EOS-USDT",
+    )
+
+
+def test_backfill_discovers_extra_indices_with_history_at_configured_start(
+    tmp_path: Path,
+) -> None:
+    target = date(2020, 1, 2)
+    config = _config(tmp_path)
+    config.discover_historical_indices = True
+    config.datasets.index_price_candles.enabled = True
+    config.datasets.index_price_candles.start = target
+    price_calls: list[str] = []
+
+    class FakeDiscoveryClient:
+        async def __aenter__(self) -> FakeDiscoveryClient:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def fetch_instruments(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "instType": "SWAP",
+                    "baseCcy": "BTC",
+                    "uly": "BTC-USDT",
+                    "listTime": "1577836800000",
+                }
+            ]
+
+        async def fetch_index_ids(self) -> list[str]:
+            return ["BTC-USDT", "EOS-USDT", "NEW-USDT"]
+
+        async def index_has_candles_on_date(
+            self,
+            instrument_id: str,
+            target_date: date,
+        ) -> bool:
+            assert target_date == target
+            return instrument_id == "EOS-USDT"
+
+        async def fetch_price_candles(
+            self,
+            *,
+            instrument_id: str,
+            start_ms: int,
+            end_ms: int,
+            index: bool,
+        ) -> list[list[object]]:
+            assert index is True
+            price_calls.append(instrument_id)
+            return [[start_ms, "1", "2", "0.5", "1.5", "1"]]
+
+    synchronizer = OfflineSynchronizer(config, client_factory=FakeDiscoveryClient)
+    synchronizer._check_disk = lambda: None
+    report = asyncio.run(
+        synchronizer.run(
+            mode="backfill",
+            start=target,
+            end=target,
+            datasets={"index_price_candles"},
+            today=target + timedelta(days=1),
+        )
+    )
+
+    assert report["status"] == "success", json.dumps(report, indent=2)
+    assert report["index_discovery"]["discovered"] == ["EOS-USDT"]
+    assert price_calls == ["BTC-USDT", "EOS-USDT"]
+    assert synchronizer.catalog.historical_indices()[0]["identifier"] == "EOS-USDT"
 
 
 def test_instrument_catalog_prefers_official_underlying_for_index_id(tmp_path: Path) -> None:
@@ -686,6 +768,114 @@ def test_price_run_filters_listing_window_and_caches_invalid_identifier(
     assert invalid[0]["failure_count"] == 1
     assert invalid[0]["skip_count"] == 2
     assert invalid[0]["last_skipped_target_date"] == listed_day.isoformat()
+
+
+def test_index_compensation_merges_only_missing_identifiers_and_resumes(
+    tmp_path: Path,
+) -> None:
+    target = date(2020, 2, 10)
+    config = _config(tmp_path)
+    config.datasets.index_price_candles.enabled = True
+    config.datasets.index_price_candles.start = date(2020, 1, 2)
+    calls: list[str] = []
+
+    class FakeClient:
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def fetch_instruments(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "instType": "SWAP",
+                    "baseCcy": "BTC",
+                    "uly": "BTC-USDT",
+                    "listTime": "1577836800000",
+                }
+            ]
+
+        async def fetch_price_candles(
+            self,
+            *,
+            instrument_id: str,
+            start_ms: int,
+            end_ms: int,
+            index: bool,
+        ) -> list[list[object]]:
+            assert index is True
+            calls.append(instrument_id)
+            return [[start_ms, "1", "2", "0.5", "1.5", "1"]]
+
+    synchronizer = OfflineSynchronizer(config, client_factory=FakeClient)
+    synchronizer._check_disk = lambda: None
+    initial = asyncio.run(
+        synchronizer.run(
+            mode="range",
+            start=target,
+            end=target,
+            datasets={"index_price_candles"},
+            today=target + timedelta(days=1),
+        )
+    )
+    assert initial["status"] == "success", json.dumps(initial, indent=2)
+
+    config.historical_index_ids = ("EOS-USDT",)
+    planned = synchronizer.plan(
+        mode="backfill",
+        start=target,
+        end=target,
+        datasets={"index_price_candles"},
+        today=target + timedelta(days=1),
+    )
+    assert len(planned) == 1
+    assert planned[0].identifiers == ("EOS-USDT",)
+
+    compensation = asyncio.run(
+        synchronizer.run(
+            mode="backfill",
+            start=target,
+            end=target,
+            datasets={"index_price_candles"},
+            today=target + timedelta(days=1),
+        )
+    )
+    assert compensation["status"] == "success", json.dumps(compensation, indent=2)
+    assert compensation["planned_tasks"] == 1
+    assert calls == ["BTC-USDT", "EOS-USDT"]
+
+    output = OfflineLayout(tmp_path).normalized_path("index_price_candles", target)
+    assert set(pl.read_parquet(output).get_column("index_id")) == {
+        "BTC-USDT",
+        "EOS-USDT",
+    }
+    coverage = synchronizer.catalog.coverage_record("index_price_candles", target)
+    assert coverage is not None
+    assert coverage["row_count"] == 2
+    assert synchronizer.catalog.identifier_coverage_summary() == [
+        {
+            "dataset": "index_price_candles",
+            "identifier": "EOS-USDT",
+            "start_date": target.isoformat(),
+            "end_date": target.isoformat(),
+            "partitions": 1,
+            "rows": 1,
+        }
+    ]
+
+    resumed = asyncio.run(
+        synchronizer.run(
+            mode="backfill",
+            start=target,
+            end=target,
+            datasets={"index_price_candles"},
+            today=target + timedelta(days=1),
+        )
+    )
+    assert resumed["planned_tasks"] == 0
+    assert calls == ["BTC-USDT", "EOS-USDT"]
 
 
 def test_pre_archive_candles_use_rest_and_active_instrument_windows(tmp_path: Path) -> None:

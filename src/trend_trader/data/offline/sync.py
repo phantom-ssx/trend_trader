@@ -72,6 +72,7 @@ class SyncTask:
     dataset: str
     target_date: date
     scope_key: str = "all"
+    identifiers: tuple[str, ...] = ()
 
 
 @dataclass
@@ -83,6 +84,7 @@ class DatasetResult:
     rows: int = 0
     files: list[str] = field(default_factory=list)
     error: str | None = None
+    identifiers: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -114,10 +116,16 @@ class OfflineSynchronizer:
         start: date | None = None,
         end: date | None = None,
         datasets: set[str] | None = None,
+        identifiers: set[str] | None = None,
     ) -> list[SyncTask]:
         if mode not in {"daily", "backfill", "range"}:
             raise ValueError(f"unsupported mode: {mode}")
         current = today or datetime.now(UTC).date()
+        selected_identifiers = tuple(
+            sorted(identifier.strip().upper() for identifier in identifiers or set())
+        )
+        if selected_identifiers and datasets != {"index_price_candles"}:
+            raise ValueError("--identifier requires only --dataset index_price_candles")
         tasks: list[SyncTask] = []
         for dataset, options in self.config.datasets.enabled().items():
             if datasets and dataset not in datasets:
@@ -146,6 +154,20 @@ class OfflineSynchronizer:
                         last - timedelta(days=self.config.daily_history_days_per_run - 1),
                     )
                 candidates = list(_date_range(first, last))
+                if selected_identifiers:
+                    for day in candidates:
+                        pending = tuple(
+                            identifier
+                            for identifier in selected_identifiers
+                            if not self.catalog.is_identifier_resolved(
+                                dataset,
+                                identifier,
+                                day,
+                            )
+                        )
+                        if pending:
+                            tasks.append(SyncTask(dataset, day, scope, pending))
+                    continue
                 missing = [
                     day for day in candidates if not self.catalog.is_resolved(dataset, day, scope)
                 ]
@@ -153,6 +175,22 @@ class OfflineSynchronizer:
                     overlap_start = max(first, last - timedelta(days=2))
                     missing = sorted(set(missing) | set(_date_range(overlap_start, last)))
                 tasks.extend(SyncTask(dataset, day, scope) for day in missing)
+                if dataset == "index_price_candles":
+                    missing_dates = set(missing)
+                    supplemental_indices = self._supplemental_index_windows()
+                    for day in candidates:
+                        if day in missing_dates:
+                            continue
+                        pending = tuple(
+                            identifier
+                            for identifier, first_observed in supplemental_indices.items()
+                            if day >= first_observed
+                            and not self.catalog.is_identifier_resolved(
+                                dataset, identifier, day
+                            )
+                        )
+                        if pending:
+                            tasks.append(SyncTask(dataset, day, scope, pending))
         return sorted(tasks, key=lambda item: (item.target_date, item.dataset, item.scope_key))
 
     async def run(
@@ -162,6 +200,7 @@ class OfflineSynchronizer:
         start: date | None = None,
         end: date | None = None,
         datasets: set[str] | None = None,
+        identifiers: set[str] | None = None,
         today: date | None = None,
     ) -> dict[str, Any]:
         run_id = f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
@@ -179,25 +218,35 @@ class OfflineSynchronizer:
             self.catalog.begin_run(run_id, mode, report)
             try:
                 self._check_disk()
-                tasks = self.plan(
-                    mode=mode,
-                    start=start,
-                    end=end,
-                    datasets=datasets,
-                    today=today,
-                )
-                report["planned_tasks"] = len(tasks)
                 async with self.client_factory() as client:
                     instruments = await client.fetch_instruments()
                     seen_at = datetime.now(UTC)
                     for instrument in instruments:
                         self.catalog.upsert_instrument(instrument, seen_at)
                     report["current_instruments"] = len(instruments)
+                    if self._should_discover_indices(mode, datasets, identifiers):
+                        report["index_discovery"] = await self._discover_historical_indices(
+                            client
+                        )
+                    tasks = self.plan(
+                        mode=mode,
+                        start=start,
+                        end=end,
+                        datasets=datasets,
+                        identifiers=identifiers,
+                        today=today,
+                    )
+                    report["planned_tasks"] = len(tasks)
                     for task in tasks:
                         self._check_disk()
                         _progress(
                             f"start dataset={task.dataset} date={task.target_date} "
                             f"scope={task.scope_key}"
+                            + (
+                                f" identifiers={','.join(task.identifiers)}"
+                                if task.identifiers
+                                else ""
+                            )
                         )
                         result = await self._execute(client, task)
                         report["results"].append(asdict(result))
@@ -254,14 +303,57 @@ class OfflineSynchronizer:
                 else ("complete_empty" if task.dataset.startswith("private_") else "unavailable")
             )
             artifact = str(outputs[0][1]) if outputs else None
-            self.catalog.mark_coverage(
-                task.dataset,
-                task.target_date,
-                status=status,
-                row_count=frame.height,
-                scope_key=task.scope_key,
-                artifact_path=artifact,
+            stored_rows = next(
+                (
+                    row_count
+                    for output_date, _, row_count in outputs
+                    if output_date == task.target_date
+                ),
+                frame.height,
             )
+            coverage_identifiers = (
+                task.identifiers
+                if task.identifiers
+                else (
+                    tuple(self._supplemental_index_windows())
+                    if task.dataset == "index_price_candles"
+                    else ()
+                )
+            )
+            for identifier in coverage_identifiers:
+                identifier_rows = frame.filter(pl.col("index_id") == identifier).height
+                self.catalog.mark_identifier_coverage(
+                    task.dataset,
+                    identifier,
+                    task.target_date,
+                    status="complete" if identifier_rows else "unavailable",
+                    row_count=identifier_rows,
+                    artifact_path=artifact,
+                )
+            if task.identifiers:
+                existing = self.catalog.coverage_record(
+                    task.dataset,
+                    task.target_date,
+                    task.scope_key,
+                )
+                if existing and (frame.height or str(existing["status"]) != "unavailable"):
+                    self.catalog.mark_coverage(
+                        task.dataset,
+                        task.target_date,
+                        status="complete" if frame.height else str(existing["status"]),
+                        row_count=stored_rows if frame.height else int(existing["row_count"]),
+                        scope_key=task.scope_key,
+                        artifact_path=artifact or str(existing.get("artifact_path") or "") or None,
+                    )
+            else:
+                self.catalog.mark_coverage(
+                    task.dataset,
+                    task.target_date,
+                    status=status,
+                    row_count=stored_rows,
+                    scope_key=task.scope_key,
+                    artifact_path=artifact,
+                )
             if frame.height:
                 first_time = _first_timestamp_text(frame)
                 self.catalog.upsert_availability(
@@ -288,21 +380,33 @@ class OfflineSynchronizer:
                 status,
                 rows=frame.height,
                 files=[str(file) for file in [*files, *(item[1] for item in outputs)]],
+                identifiers=list(task.identifiers),
             )
         except Exception as exc:
-            self.catalog.mark_coverage(
-                task.dataset,
-                task.target_date,
-                status="failed",
-                row_count=0,
-                scope_key=task.scope_key,
-            )
+            if task.identifiers:
+                for identifier in task.identifiers:
+                    self.catalog.mark_identifier_coverage(
+                        task.dataset,
+                        identifier,
+                        task.target_date,
+                        status="failed",
+                        row_count=0,
+                    )
+            else:
+                self.catalog.mark_coverage(
+                    task.dataset,
+                    task.target_date,
+                    status="failed",
+                    row_count=0,
+                    scope_key=task.scope_key,
+                )
             return DatasetResult(
                 task.dataset,
                 task.target_date.isoformat(),
                 task.scope_key,
                 "failed",
                 error=f"{type(exc).__name__}: {exc}",
+                identifiers=list(task.identifiers),
             )
 
     async def _execute_historical_file_dataset(
@@ -524,6 +628,21 @@ class OfflineSynchronizer:
                 and _instrument_active_on_date(row, task.target_date)
             ):
                 rows_by_identifier.setdefault(identifier, []).append(row)
+        if is_index:
+            for identifier, first_observed in self._supplemental_index_windows().items():
+                if task.target_date >= first_observed:
+                    rows_by_identifier.setdefault(
+                        identifier,
+                        [_historical_index_source(identifier, first_observed)],
+                    )
+        if task.identifiers:
+            rows_by_identifier = {
+                identifier: rows_by_identifier.get(
+                    identifier,
+                    [_historical_index_source(identifier, None)],
+                )
+                for identifier in task.identifiers
+            }
         raw: dict[str, object] = {}
         fragments: list[pl.DataFrame] = []
         skipped_invalid: dict[str, object] = {}
@@ -591,7 +710,18 @@ class OfflineSynchronizer:
                 f"skip-cached-invalid dataset={task.dataset} "
                 f"count={len(skipped_invalid)}"
             )
-        raw_path = self.raw.write_json_gz(task.dataset, task.target_date, raw)
+        suffix = ""
+        if task.identifiers:
+            subset_digest = hashlib.sha256(
+                "\n".join(task.identifiers).encode()
+            ).hexdigest()[:12]
+            suffix = f"-subset-{subset_digest}"
+        raw_path = self.raw.write_json_gz(
+            task.dataset,
+            task.target_date,
+            raw,
+            suffix=suffix,
+        )
         self._record_rest_raw(raw_path, task.dataset)
         return [raw_path], _concat(fragments, DATASET_STORAGE[task.dataset][0])
 
@@ -873,6 +1003,83 @@ class OfflineSynchronizer:
             }
         )
 
+    def _supplemental_index_windows(self) -> dict[str, date]:
+        configured_start = self.config.datasets.index_price_candles.start
+        fallback_start = configured_start or date.min
+        result = {
+            identifier: fallback_start for identifier in self.config.historical_index_ids
+        }
+        for row in self.catalog.historical_indices():
+            identifier = str(row["identifier"])
+            first_observed = date.fromisoformat(str(row["first_observed_date"]))
+            result[identifier] = min(result.get(identifier, first_observed), first_observed)
+        return dict(sorted(result.items()))
+
+    def _should_discover_indices(
+        self,
+        mode: str,
+        datasets: set[str] | None,
+        identifiers: set[str] | None,
+    ) -> bool:
+        return bool(
+            mode == "backfill"
+            and self.config.discover_historical_indices
+            and self.config.datasets.index_price_candles.enabled
+            and (datasets is None or "index_price_candles" in datasets)
+            and not identifiers
+            and self.config.datasets.index_price_candles.start is not None
+        )
+
+    async def _discover_historical_indices(
+        self,
+        client: OkxOfflineClient,
+    ) -> dict[str, object]:
+        target_date = self.config.datasets.index_price_candles.start
+        if target_date is None:
+            return {"status": "disabled_without_start"}
+        discovery_key = f"index-universe-at:{target_date.isoformat()}"
+        if self.catalog.discovery_completed(discovery_key):
+            return {"status": "already_complete", "target_date": target_date.isoformat()}
+
+        instrument_rows = self.catalog.list_instruments()
+        known = {
+            str(row.get("index_id") or "")
+            for row in instrument_rows
+            if str(row.get("instrument_type") or "").upper() in {"SWAP", "FUTURES"}
+            and row.get("index_id")
+            and _instrument_active_on_date(row, target_date)
+        }
+        known.update(self._supplemental_index_windows())
+        candidates = await client.fetch_index_ids()
+        to_probe = [identifier for identifier in candidates if identifier not in known]
+        discovered: list[str] = []
+        for number, identifier in enumerate(to_probe, start=1):
+            if await client.index_has_candles_on_date(identifier, target_date):
+                self.catalog.upsert_historical_index(
+                    identifier,
+                    target_date,
+                    discovery_method="index_tickers_history_probe",
+                )
+                discovered.append(identifier)
+            if number % 100 == 0:
+                _progress(
+                    f"discover-index-universe date={target_date} "
+                    f"checked={number}/{len(to_probe)} found={len(discovered)}"
+                )
+        metadata = {
+            "target_date": target_date.isoformat(),
+            "ticker_candidates": len(candidates),
+            "known_before_probe": len(known),
+            "probed": len(to_probe),
+            "discovered": discovered,
+        }
+        self.catalog.mark_discovery_completed(discovery_key, metadata)
+        _progress(
+            f"discover-index-universe date={target_date} status=complete "
+            f"probed={len(to_probe)} found={len(discovered)}"
+        )
+        return {"status": "complete", **metadata}
+
     def _rest_candle_boundary(self, task: SyncTask) -> pl.DataFrame | None:
         if task.dataset != "candles" or task.target_date != CANDLE_ARCHIVE_START:
             return None
@@ -1125,6 +1332,25 @@ def _instrument_active_on_date(row: Mapping[str, object], target_date: date) -> 
     return (listing_time is None or listing_time < end) and (
         expiration_time is None or expiration_time > start
     )
+
+
+def _historical_index_source(
+    identifier: str,
+    listing_date: date | None,
+) -> Mapping[str, object]:
+    return {
+        "instrument_id": f"historical-index:{identifier}",
+        "instrument_type": "INDEX",
+        "index_id": identifier,
+        "listing_time": (
+            datetime.combine(listing_date, time.min, tzinfo=UTC).isoformat()
+            if listing_date
+            else ""
+        ),
+        "expiration_time": "",
+        "category": "crypto",
+        "rule_type": "historical_contract_index",
+    }
 
 
 def _instrument_source_fingerprint(rows: Iterable[Mapping[str, object]]) -> str:
