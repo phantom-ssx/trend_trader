@@ -1,6 +1,5 @@
 data_root = "/data/market/v1"
 okx_base_url = "https://www.okx.com"
-historical_page_base_url = "https://www.okx.com"
 requests_per_second = 3.0
 request_timeout_seconds = 30.0
 max_retries = 5

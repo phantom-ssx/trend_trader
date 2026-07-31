@@ -7,7 +7,7 @@ import hmac
 import json
 import os
 from collections.abc import Mapping
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -19,7 +19,8 @@ import httpx
 from trend_trader.data.offline.config import OfflineSyncConfig
 from trend_trader.data.offline.storage import sha256_file
 
-HISTORICAL_LINK_PATH = "/priapi/v5/broker/public/trade-data/download-link"
+HISTORICAL_LINK_PATH = "/api/v5/public/market-data-history"
+OKX_SOURCE_TIMEZONE = timezone(timedelta(hours=8))
 INSTRUMENTS_PATH = "/api/v5/public/instruments"
 MARK_CANDLES_PATH = "/api/v5/market/history-mark-price-candles"
 INDEX_CANDLES_PATH = "/api/v5/market/history-index-candles"
@@ -101,9 +102,7 @@ class OkxOfflineClient:
         headers: dict[str, str] = {}
         if credentials:
             api_key, secret_key, passphrase = credentials
-            timestamp = datetime.now(UTC).isoformat(timespec="milliseconds").replace(
-                "+00:00", "Z"
-            )
+            timestamp = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
             message = f"{timestamp}{method.upper()}{request_path}{encoded_body}"
             signature = base64.b64encode(
                 hmac.new(secret_key.encode(), message.encode(), hashlib.sha256).digest()
@@ -176,21 +175,22 @@ class OkxOfflineClient:
         source_date: date,
     ) -> list[dict[str, object]]:
         timestamp = int(
-            datetime(source_date.year, source_date.month, source_date.day, tzinfo=UTC).timestamp()
+            datetime.combine(
+                source_date,
+                time.min,
+                tzinfo=OKX_SOURCE_TIMEZONE,
+            ).timestamp()
             * 1000
         )
         payload = await self.request(
-            "POST",
-            f"{self.config.historical_page_base_url}{HISTORICAL_LINK_PATH}",
-            body={
+            "GET",
+            HISTORICAL_LINK_PATH,
+            params={
                 "module": str(module),
                 "instType": instrument_type,
-                "instQueryParam": {"instFamilyList": []},
-                "dateQuery": {
-                    "dateAggrType": "daily",
-                    "begin": str(timestamp),
-                    "end": str(timestamp),
-                },
+                "dateAggrType": "daily",
+                "begin": str(timestamp),
+                "end": str(timestamp),
             },
         )
         return _download_link_records(payload.get("data", []))
@@ -324,9 +324,7 @@ class OkxOfflineClient:
             )
             data = payload.get("data", [])
             page = (
-                [item for item in data if isinstance(item, dict)]
-                if isinstance(data, list)
-                else []
+                [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
             )
             if not page:
                 break
@@ -358,7 +356,7 @@ def _download_link_records(node: object) -> list[dict[str, object]]:
         return [record for item in node for record in _download_link_records(item)]
     if not isinstance(node, dict):
         return []
-    if any(node.get(key) for key in ("url", "downloadUrl", "downloadLink")):
+    if any(node.get(key) for key in ("url", "downloadUrl", "downloadLink", "fileHref", "href")):
         return [node]
     result: list[dict[str, object]] = []
     for value in node.values():

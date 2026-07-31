@@ -6,13 +6,37 @@ import json
 import re
 import zipfile
 from collections.abc import Iterable, Iterator, Mapping
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 import polars as pl
 
 UTC_MS = pl.Datetime(time_unit="ms", time_zone="UTC")
 MONEY = pl.Decimal(precision=38, scale=18)
+OKX_SOURCE_TIMEZONE = timezone(timedelta(hours=8))
+MAX_STANDARD_FUTURES_LEAD_DAYS = 730
+
+
+class ArchiveDataQualityError(ValueError):
+    """The archive parsed successfully but violates an offline-data invariant."""
+
+
+@dataclass
+class ArchiveParseStats:
+    input_rows: int = 0
+    emitted_rows: int = 0
+    adjacent_duplicate_rows: int = 0
+    skipped_rows: int = 0
+    conflicting_rows: int = 0
+
+    @property
+    def duplicate_ratio(self) -> float:
+        comparable_rows = self.emitted_rows + self.adjacent_duplicate_rows
+        if comparable_rows == 0:
+            return 0.0
+        return self.adjacent_duplicate_rows / comparable_rows
+
 
 CANDLE_SCHEMA = {
     "venue": pl.Utf8,
@@ -228,7 +252,8 @@ def empty_frame(schema: Mapping[str, pl.DataType]) -> pl.DataFrame:
 
 
 def instrument_type(instrument_id: str) -> str:
-    return "SWAP" if instrument_id.endswith("-SWAP") else "FUTURES"
+    canonical_name = instrument_id.split("#OLD#", maxsplit=1)[0]
+    return "SWAP" if canonical_name.endswith("-SWAP") else "FUTURES"
 
 
 def parse_candle_archive(path: Path) -> pl.DataFrame:
@@ -240,33 +265,62 @@ def iter_candle_archive_batches(
     path: Path,
     *,
     batch_size: int = 25_000,
+    source_date: date | None = None,
+    stats: ArchiveParseStats | None = None,
 ) -> Iterator[pl.DataFrame]:
+    parse_stats = stats if stats is not None else ArchiveParseStats()
     rows: list[dict[str, object]] = []
-    for source, member_name in _zip_csv_rows(path):
+    previous_key: tuple[str, int] | None = None
+    previous_signature: tuple[object, ...] | None = None
+    for source, member_name in _zip_csv_rows(path, parse_stats):
         inferred = _instrument_from_filename(member_name)
         for row in source:
-            instrument_id = _pick(row, "instId", "instrument_id", "instrument", "symbol")
+            instrument_id = _pick(
+                row,
+                "instId",
+                "instrument_id",
+                "instrument_name",
+                "instrument",
+                "symbol",
+            )
             instrument_id = instrument_id or inferred
             timestamp = _pick(row, "ts", "timestamp", "open_time", "start_at")
-            if not instrument_id or not timestamp:
+            timestamp_ms = _int(timestamp)
+            if not instrument_id or timestamp_ms is None:
+                parse_stats.skipped_rows += 1
                 continue
-            rows.append(
-                {
-                    "venue": "OKX",
-                    "instrument_id": instrument_id,
-                    "instrument_type": instrument_type(instrument_id),
-                    "bar_type": "1m",
-                    "timestamp": _int(timestamp),
-                    "open": _pick(row, "o", "open"),
-                    "high": _pick(row, "h", "high"),
-                    "low": _pick(row, "l", "low"),
-                    "close": _pick(row, "c", "close"),
-                    "volume": _pick(row, "vol", "volume"),
-                    "volume_ccy": _pick(row, "volCcy", "volume_ccy"),
-                    "volume_quote": _pick(row, "volCcyQuote", "volQuote", "volume_quote"),
-                    "confirm": _pick(row, "confirm") or "1",
-                }
-            )
+            _validate_futures_expiry(path, source_date, instrument_id)
+            _validate_source_timestamp(path, source_date, instrument_id, timestamp_ms)
+            normalized = {
+                "venue": "OKX",
+                "instrument_id": instrument_id,
+                "instrument_type": instrument_type(instrument_id),
+                "bar_type": "1m",
+                "timestamp": timestamp_ms,
+                "open": _pick(row, "o", "open"),
+                "high": _pick(row, "h", "high"),
+                "low": _pick(row, "l", "low"),
+                "close": _pick(row, "c", "close"),
+                "volume": _pick(row, "vol", "volume"),
+                "volume_ccy": _pick(row, "volCcy", "volume_ccy"),
+                "volume_quote": _pick(row, "volCcyQuote", "volQuote", "volume_quote"),
+                "confirm": _pick(row, "confirm") or "1",
+            }
+            key = (instrument_id, timestamp_ms)
+            signature = tuple(normalized.values())
+            if key == previous_key:
+                if signature == previous_signature:
+                    parse_stats.adjacent_duplicate_rows += 1
+                    continue
+                parse_stats.conflicting_rows += 1
+                raise ArchiveDataQualityError(
+                    f"{path.name}: conflicting candle rows for "
+                    f"instrument={instrument_id} timestamp={timestamp_ms}"
+                )
+            previous_key = key
+            previous_signature = signature
+            rows.append(normalized)
+            parse_stats.emitted_rows += 1
             if len(rows) >= batch_size:
                 yield _frame(rows, CANDLE_SCHEMA)
                 rows = []
@@ -283,28 +337,61 @@ def iter_funding_archive_batches(
     path: Path,
     *,
     batch_size: int = 25_000,
+    source_date: date | None = None,
+    stats: ArchiveParseStats | None = None,
 ) -> Iterator[pl.DataFrame]:
+    parse_stats = stats if stats is not None else ArchiveParseStats()
     rows: list[dict[str, object]] = []
-    for source, member_name in _zip_csv_rows(path):
+    previous_key: tuple[str, int] | None = None
+    previous_signature: tuple[object, ...] | None = None
+    for source, member_name in _zip_csv_rows(path, parse_stats):
         inferred = _instrument_from_filename(member_name)
         for row in source:
-            instrument_id = _pick(row, "instId", "instrument_id", "instrument", "symbol")
+            instrument_id = _pick(
+                row,
+                "instId",
+                "instrument_id",
+                "instrument_name",
+                "instrument",
+                "symbol",
+            )
             instrument_id = instrument_id or inferred
             funding_time = _pick(row, "fundingTime", "funding_time", "ts", "timestamp")
-            if not instrument_id or not funding_time:
+            funding_time_ms = _int(funding_time)
+            if not instrument_id or funding_time_ms is None:
+                parse_stats.skipped_rows += 1
                 continue
-            rate = _pick(row, "realizedRate", "realized_rate", "fundingRate", "funding_rate")
-            rows.append(
-                {
-                    "venue": "OKX",
-                    "instrument_id": instrument_id,
-                    "instrument_type": "SWAP",
-                    "funding_time": _int(funding_time),
-                    "funding_rate": _pick(row, "fundingRate", "funding_rate") or rate,
-                    "realized_rate": rate,
-                    "method": _pick(row, "method"),
-                }
+            _validate_source_timestamp(
+                path,
+                source_date,
+                instrument_id,
+                funding_time_ms,
             )
+            rate = _pick(row, "realizedRate", "realized_rate", "fundingRate", "funding_rate")
+            normalized = {
+                "venue": "OKX",
+                "instrument_id": instrument_id,
+                "instrument_type": "SWAP",
+                "funding_time": funding_time_ms,
+                "funding_rate": _pick(row, "fundingRate", "funding_rate") or rate,
+                "realized_rate": rate,
+                "method": _pick(row, "method"),
+            }
+            key = (instrument_id, funding_time_ms)
+            signature = tuple(normalized.values())
+            if key == previous_key:
+                if signature == previous_signature:
+                    parse_stats.adjacent_duplicate_rows += 1
+                    continue
+                parse_stats.conflicting_rows += 1
+                raise ArchiveDataQualityError(
+                    f"{path.name}: conflicting funding rows for "
+                    f"instrument={instrument_id} timestamp={funding_time_ms}"
+                )
+            previous_key = key
+            previous_signature = signature
+            rows.append(normalized)
+            parse_stats.emitted_rows += 1
             if len(rows) >= batch_size:
                 yield _frame(rows, FUNDING_SCHEMA)
                 rows = []
@@ -526,20 +613,39 @@ def private_bills_frame(rows: Iterable[Mapping[str, object]], account_alias: str
     return _frame(normalized, PRIVATE_BILL_SCHEMA)
 
 
-def _zip_csv_rows(path: Path) -> Iterable[tuple[csv.DictReader[str], str]]:
+def _zip_csv_rows(
+    path: Path,
+    stats: ArchiveParseStats,
+) -> Iterable[tuple[csv.DictReader[str], str]]:
     with zipfile.ZipFile(path) as archive:
-        bad = archive.testzip()
-        if bad is not None:
-            raise ValueError(f"ZIP CRC validation failed for {bad}")
         for member in archive.infolist():
             if member.is_dir() or not member.filename.lower().endswith((".csv", ".txt")):
                 continue
             with archive.open(member) as compressed:
                 with io.TextIOWrapper(compressed, encoding="utf-8-sig", newline="") as text:
-                    reader = csv.DictReader(text)
+                    reader = csv.DictReader(_unique_adjacent_lines(text, stats))
                     if not reader.fieldnames:
                         continue
                     yield reader, member.filename
+
+
+def _unique_adjacent_lines(
+    lines: Iterable[str],
+    stats: ArchiveParseStats,
+) -> Iterator[str]:
+    iterator = iter(lines)
+    header = next(iterator, None)
+    if header is None:
+        return
+    yield header
+    previous: str | None = None
+    for line in iterator:
+        stats.input_rows += 1
+        if line == previous:
+            stats.adjacent_duplicate_rows += 1
+            continue
+        previous = line
+        yield line
 
 
 def _frame(rows: list[dict[str, object]], schema: Mapping[str, pl.DataType]) -> pl.DataFrame:
@@ -585,6 +691,58 @@ def _instrument_from_filename(filename: str) -> str:
         name,
     )
     return match.group(1) if match else ""
+
+
+def _validate_source_timestamp(
+    path: Path,
+    source_date: date | None,
+    instrument_id: str,
+    timestamp_ms: int,
+) -> None:
+    if source_date is None:
+        return
+    start = int(
+        datetime.combine(source_date, time.min, tzinfo=OKX_SOURCE_TIMEZONE).timestamp() * 1000
+    )
+    end = start + 24 * 60 * 60 * 1000
+    if not start <= timestamp_ms < end:
+        raise ArchiveDataQualityError(
+            f"{path.name}: timestamp outside OKX source date "
+            f"instrument={instrument_id} timestamp={timestamp_ms} "
+            f"source_date={source_date.isoformat()}"
+        )
+
+
+def _validate_futures_expiry(
+    path: Path,
+    source_date: date | None,
+    instrument_id: str,
+) -> None:
+    if (
+        source_date is None
+        or instrument_type(instrument_id) != "FUTURES"
+        or "_XPERP-" in instrument_id
+    ):
+        return
+    canonical_name = instrument_id.split("#OLD#", maxsplit=1)[0]
+    match = re.search(r"-(\d{6}|\d{8})$", canonical_name)
+    if match is None:
+        return
+    encoded = match.group(1)
+    pattern = "%y%m%d" if len(encoded) == 6 else "%Y%m%d"
+    try:
+        expiration_date = datetime.strptime(encoded, pattern).date()
+    except ValueError:
+        return
+    days_to_expiry = (expiration_date - source_date).days
+    if 0 <= days_to_expiry <= MAX_STANDARD_FUTURES_LEAD_DAYS:
+        return
+    raise ArchiveDataQualityError(
+        f"{path.name}: implausible standard futures expiry "
+        f"instrument={instrument_id} source_date={source_date.isoformat()} "
+        f"expiration_date={expiration_date.isoformat()} "
+        f"days_to_expiry={days_to_expiry}"
+    )
 
 
 def _int(value: object) -> int | None:

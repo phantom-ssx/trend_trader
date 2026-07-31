@@ -19,7 +19,13 @@ from trend_trader.data.offline.config import (
     PrivateAccountConfig,
 )
 from trend_trader.data.offline.notify import format_run_notification
-from trend_trader.data.offline.schemas import CANDLE_SCHEMA, parse_candle_archive
+from trend_trader.data.offline.schemas import (
+    CANDLE_SCHEMA,
+    ArchiveDataQualityError,
+    ArchiveParseStats,
+    iter_candle_archive_batches,
+    parse_candle_archive,
+)
 from trend_trader.data.offline.storage import (
     DailyParquetRepository,
     OfflineLayout,
@@ -74,8 +80,7 @@ def test_oi_retention_is_planned_separately_by_period(tmp_path: Path) -> None:
     )
 
     counts = {
-        period: sum(task.scope_key == period for task in tasks)
-        for period in ("5m", "1H", "1D")
+        period: sum(task.scope_key == period for task in tasks) for period in ("5m", "1H", "1D")
     }
     assert counts == {"5m": 2, "1H": 14, "1D": 14}
 
@@ -142,13 +147,8 @@ def test_archive_parser_and_daily_file_keep_all_instruments(tmp_path: Path) -> N
 def test_archive_parser_yields_fixed_batches_without_loading_member(
     tmp_path: Path,
 ) -> None:
-    from trend_trader.data.offline.schemas import iter_candle_archive_batches
-
     archive_path = tmp_path / "candles.zip"
-    rows = "\n".join(
-        f"{1722384000000 + index * 60000},1,2,0.5,1.5,10,2,15,1"
-        for index in range(5)
-    )
+    rows = "\n".join(f"{1722384000000 + index * 60000},1,2,0.5,1.5,10,2,15,1" for index in range(5))
     with zipfile.ZipFile(archive_path, "w") as archive:
         archive.writestr(
             "BTC-USD-260101.csv",
@@ -159,10 +159,123 @@ def test_archive_parser_yields_fixed_batches_without_loading_member(
 
     assert [batch.height for batch in batches] == [2, 2, 1]
     assert {
-        value
-        for batch in batches
-        for value in batch.get_column("instrument_id").unique().to_list()
+        value for batch in batches for value in batch.get_column("instrument_id").unique().to_list()
     } == {"BTC-USD-260101"}
+
+
+def test_archive_parser_reads_instrument_name_and_drops_adjacent_duplicates(
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "candles.zip"
+    row = "BTC-USD-SWAP,30070.4,30070.4,30057.3,30066.4,341,None,None,1688140800000,1\n"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(
+            "candles.csv",
+            "instrument_name,open,high,low,close,vol,vol_ccy,vol_quote,"
+            "open_time,confirm\n" + row * 3,
+        )
+    stats = ArchiveParseStats()
+
+    batches = list(
+        iter_candle_archive_batches(
+            archive_path,
+            source_date=date(2023, 7, 1),
+            stats=stats,
+        )
+    )
+
+    assert sum(batch.height for batch in batches) == 1
+    assert batches[0]["instrument_id"][0] == "BTC-USD-SWAP"
+    assert stats.input_rows == 3
+    assert stats.emitted_rows == 1
+    assert stats.adjacent_duplicate_rows == 2
+    assert stats.duplicate_ratio == pytest.approx(2 / 3)
+
+
+def test_archive_parser_accepts_and_reports_high_official_duplicate_ratio(
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "candles.zip"
+    row = "BTC-USDT-SWAP,1688140800000,1,2,0.5,1.5,10,2,15,1\n"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(
+            "candles.csv",
+            "instId,ts,o,h,l,c,vol,volCcy,volCcyQuote,confirm\n" + row * 4,
+        )
+    stats = ArchiveParseStats()
+
+    batches = list(
+        iter_candle_archive_batches(
+            archive_path,
+            source_date=date(2023, 7, 1),
+            stats=stats,
+        )
+    )
+
+    assert sum(batch.height for batch in batches) == 1
+    assert stats.input_rows == 4
+    assert stats.adjacent_duplicate_rows == 3
+    assert stats.duplicate_ratio == pytest.approx(0.75)
+
+
+def test_archive_parser_rejects_conflicting_adjacent_primary_key(
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "candles.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(
+            "candles.csv",
+            "instId,ts,o,h,l,c,vol,volCcy,volCcyQuote,confirm\n"
+            "BTC-USDT-SWAP,1688140800000,1,2,0.5,1.5,10,2,15,1\n"
+            "BTC-USDT-SWAP,1688140800000,1,2,0.5,1.6,10,2,15,1\n",
+        )
+
+    with pytest.raises(ArchiveDataQualityError, match="conflicting candle rows"):
+        list(iter_candle_archive_batches(archive_path))
+
+
+def test_archive_parser_rejects_implausible_historical_futures_name(
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "allfutures-candles.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(
+            "candles.csv",
+            "instrument_name,open,high,low,close,vol,vol_ccy,vol_quote,"
+            "open_time,confirm\n"
+            "BTC-USD-251017,30070.4,30070.4,30057.3,30066.4,"
+            "341,None,None,1688140800000,1\n",
+        )
+
+    with pytest.raises(ArchiveDataQualityError, match="implausible standard futures expiry"):
+        list(
+            iter_candle_archive_batches(
+                archive_path,
+                source_date=date(2023, 7, 1),
+            )
+        )
+
+
+def test_archive_parser_accepts_observed_long_dated_standard_future(
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "allfutures-candles.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(
+            "candles.csv",
+            "instrument_name,open,high,low,close,vol,vol_ccy,vol_quote,"
+            "open_time,confirm\n"
+            "BTC-USD-270924,1,2,0.5,1.5,10,None,None,1785168000000,1\n",
+        )
+
+    batches = list(
+        iter_candle_archive_batches(
+            archive_path,
+            source_date=date(2026, 7, 28),
+        )
+    )
+
+    assert sum(batch.height for batch in batches) == 1
 
 
 def test_streaming_repository_compacts_cross_day_batches_and_upserts(
@@ -231,9 +344,7 @@ def test_streaming_repository_compacts_cross_day_batches_and_upserts(
     assert first.height == 2
     assert first.filter(pl.col("instrument_id") == "BTC-USDT-SWAP")["close"][0] == 9.0
 
-    repository.write_batches(
-        iter([candle_frame([("BTC-USDT-SWAP", first_day, 10.0)])])
-    )
+    repository.write_batches(iter([candle_frame([("BTC-USDT-SWAP", first_day, 10.0)])]))
     revised = pl.read_parquet(first_path)
     assert revised.height == 2
     assert revised.filter(pl.col("instrument_id") == "BTC-USDT-SWAP")["close"][0] == 10.0
@@ -254,25 +365,21 @@ def test_raw_rest_revisions_are_immutable(tmp_path: Path) -> None:
 
 def test_client_flattens_official_historical_link_response(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path.endswith("/download-link")
-        payload = json.loads(request.content)
-        assert payload["module"] == "2"
+        assert request.method == "GET"
+        assert request.url.path == "/api/v5/public/market-data-history"
+        assert request.url.params["module"] == "2"
+        assert request.url.params["instType"] == "SWAP"
+        assert request.url.params["dateAggrType"] == "daily"
+        assert request.url.params["begin"] == "1785168000000"
+        assert request.url.params["end"] == "1785168000000"
         return httpx.Response(
             200,
             json={
                 "code": "0",
                 "data": [
                     {
-                        "details": [
-                            {
-                                "groupDetails": [
-                                    {
-                                        "fileName": "allswap.zip",
-                                        "url": "https://static.okx.com/allswap.zip",
-                                    }
-                                ]
-                            }
-                        ]
+                        "fileName": "allswap.zip",
+                        "fileHref": "https://static.okx.com/allswap.zip",
                     }
                 ],
             },

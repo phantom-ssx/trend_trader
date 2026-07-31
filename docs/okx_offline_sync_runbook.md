@@ -112,9 +112,9 @@ journalctl -u trend-trader-offline-sync.service -n 200 --no-pager
 
 ## 6. 小内存服务器与 OOM
 
-历史 K 线和资金费率使用有界内存流程：ZIP/CSV 固定批次读取并写临时 Parquet
-fragment，DuckDB 在固定内存上限内完成主键去重和外部排序，PyArrow 再分批写入
-最终日级 Parquet。相关配置为：
+历史 K 线和资金费率使用有界内存流程：ZIP 原始文本行先以常量内存折叠连续完全
+重复行，再进行 CSV 解析并按固定批次写临时 Parquet fragment；DuckDB 在固定内存
+上限内完成主键去重和外部排序，PyArrow 再分批写入最终日级 Parquet。相关配置为：
 
 ```toml
 stream_batch_rows = 25000
@@ -131,6 +131,14 @@ compaction_threads = 2
 ```
 
 批次越小，解析峰值内存越低；DuckDB 超出内存限制后会自动使用数据盘完成排序。
+程序不会因为官方文件重复率高而失败，但会在 journald 和 artifact metadata 记录
+`input_rows`、`emitted_rows`、`adjacent_duplicate_rows` 与 `duplicate_ratio`。
+同主键不同内容、源日期越界或明显错误的标准 FUTURES 交割日期仍会隔离 Raw 并使
+任务失败。
+
+对 OKX 官方 `allfutures-candlesticks-2023-07-01.zip` 的本机只读基准：ZIP
+39.64 MB、成员解压大小 12.11 GB、141,373,440 个原始行、去重后 83,520 行；
+预解析去重耗时约 30 秒，峰值 RSS 约 182 MB。服务器实际耗时取决于单核性能。
 临时文件位于：
 
 ```text

@@ -192,21 +192,30 @@ OKX 模块 1、2、3、11 的“日”按 UTC+8 解释；订单簿模块 4、5�
 
 对于需要合并的全市场日文件，不能随着每个合约下载完成就直接 append。正确流程是：
 
-1. 各合约/币种的 Raw 文件或 REST 响应先独立下载；
-2. ZIP 成员直接通过 `ZipExtFile + csv.DictReader` 流式读取，不把解压内容整体载入
-   内存；
-3. 每 `stream_batch_rows` 行规范化一次，并批量写入数据盘 `.staging` 目录的临时
+1. 通过正式公开接口 `GET /api/v5/public/market-data-history` 获取下载链接，各
+   Raw 文件或 REST 响应先独立下载；
+2. ZIP 成员通过 `ZipExtFile` 流式读取，不把解压内容整体载入内存；原始文本行先
+   使用常量内存折叠连续且完全相同的重复行，再交给 `csv.DictReader`；
+3. 同一主键的相邻记录若内容不同则立即失败并隔离 Raw；原始行数、输出行数、
+   连续重复行数和重复率写入日志与 artifact metadata；
+4. 每 `stream_batch_rows` 行规范化一次，并批量写入数据盘 `.staging` 目录的临时
    Parquet fragment；
-4. DuckDB 在 `compaction_memory_mb` 内存上限内使用业务主键去重，超出内存的排序
+5. DuckDB 在 `compaction_memory_mb` 内存上限内使用业务主键去重，超出内存的排序
    自动 spill 到 `.staging` 数据盘；
-5. 按排序游标每批读取固定行数，通过 `PyArrow ParquetWriter` 写入日级临时文件；
-6. 校验行数、主键、时间范围和 Parquet footer；
-7. 使用 `os.replace` 原子替换正式日文件；
-8. 删除可重建的 fragment 和 DuckDB 临时文件，Raw 文件继续永久保留。
+6. 按排序游标每批读取固定行数，通过 `PyArrow ParquetWriter` 写入日级临时文件；
+7. 校验行数、主键、时间范围和 Parquet footer；
+8. 使用 `os.replace` 原子替换正式日文件；
+9. 删除可重建的 fragment 和 DuckDB 临时文件，Raw 文件继续永久保留。
 
 不允许把所有合约数据一次性加载进内存。已有日文件由 DuckDB 直接扫描，不经过
 Python 逐行转换；最终排序结果通过 Arrow record batch 写入。默认每批 25,000 行、
 DuckDB 内存上限 512 MiB、2 个线程，2 GiB 服务器可调低到 384 MiB。
+
+实测 OKX 正式公开接口返回的 `allfutures-candlesticks-2023-07-01.zip` 中，第一
+个合约的每根分钟线连续重复 1,550 次；整个文件 141,373,440 个原始数据行折叠后
+为 83,520 行。高重复率本身只记录告警，不作为拒绝条件。旧 FUTURES 文件还可能
+出现与源日期明显不相容的交割日期，标准加密货币交割合约距离源日期超过 730 天
+或已经到期时直接隔离，`XPERP` 不使用该规则。
 
 逐笔和 L2 不执行全市场 compaction。解析器按
 `dataset + UTC date + instrument_id` 输出临时 fragment；同一输出键的 fragment
@@ -795,7 +804,7 @@ run_id: 20260730T023000Z-a13f
 
 - HTTP 200；
 - 文件大小与 API 返回的 `sizeMB` 合理一致；
-- ZIP CRC 正确；
+- ZIP 成员完整读到 EOF 并通过 CRC 校验；
 - SHA-256 已记录；
 - CSV/JSON schema 能映射到当前版本；
 - 文件覆盖日期与 manifest 一致；
@@ -803,7 +812,9 @@ run_id: 20260730T023000Z-a13f
 
 ### 7.2 数据校验
 
-- K 线：主键唯一、OHLC 合法、`confirm=1`；
+- K 线：主键唯一、OHLC 合法、`confirm=1`；完全相同的连续原始行在 CSV 解析前
+  折叠，同主键不同内容则隔离；
+- 标准 FUTURES：交割日期必须与源日期相容；`XPERP` 单独识别；
 - 逐笔：`trade_id` 唯一、价格和数量为正；
 - 资金费率：`funding_time` 唯一，允许结算周期变化；
 - L2：首个可回放事件必须是 snapshot；有 sequence ID 时检查连续性；

@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import polars as pl
@@ -21,6 +22,8 @@ from trend_trader.data.offline.client import (
 from trend_trader.data.offline.config import DatasetOptions, OfflineSyncConfig
 from trend_trader.data.offline.schemas import (
     DATASET_STORAGE,
+    ArchiveDataQualityError,
+    ArchiveParseStats,
     aggregate_oi_frame,
     iter_candle_archive_batches,
     iter_funding_archive_batches,
@@ -135,9 +138,7 @@ class OfflineSynchronizer:
                     )
                 candidates = list(_date_range(first, last))
                 missing = [
-                    day
-                    for day in candidates
-                    if not self.catalog.is_resolved(dataset, day, scope)
+                    day for day in candidates if not self.catalog.is_resolved(dataset, day, scope)
                 ]
                 if mode == "daily" and dataset.startswith("private_"):
                     overlap_start = max(first, last - timedelta(days=2))
@@ -237,11 +238,7 @@ class OfflineSynchronizer:
             status = (
                 "complete"
                 if frame.height
-                else (
-                    "complete_empty"
-                    if task.dataset.startswith("private_")
-                    else "unavailable"
-                )
+                else ("complete_empty" if task.dataset.startswith("private_") else "unavailable")
             )
             artifact = str(outputs[0][1]) if outputs else None
             self.catalog.mark_coverage(
@@ -304,6 +301,8 @@ class OfflineSynchronizer:
         first_event_seen: str | None = None
         parsed_rows = 0
         next_progress_rows = 250_000
+        parse_stats: dict[Path, ArchiveParseStats] = {}
+        instrument_windows = self._instrument_windows()
 
         def batches() -> Iterable[pl.DataFrame]:
             nonlocal first_event_seen, next_progress_rows, parsed_rows
@@ -313,16 +312,24 @@ class OfflineSynchronizer:
                 else iter_funding_archive_batches
             )
             for raw_file in raw_files:
+                file_stats = ArchiveParseStats()
+                parse_stats[raw_file.path] = file_stats
                 try:
                     for frame in iterator(
                         raw_file.path,
                         batch_size=self.config.stream_batch_rows,
+                        source_date=task.target_date,
+                        stats=file_stats,
                     ):
+                        self._validate_known_instrument_windows(
+                            frame,
+                            instrument_windows,
+                            raw_file.path,
+                        )
                         self._remember_instruments(frame, task.target_date)
                         first_event = _first_timestamp_text(frame)
                         if first_event and (
-                            first_event_seen is None
-                            or first_event < first_event_seen
+                            first_event_seen is None or first_event < first_event_seen
                         ):
                             first_event_seen = first_event
                         parsed_rows += frame.height
@@ -331,18 +338,20 @@ class OfflineSynchronizer:
                                 f"parse dataset={task.dataset} date={task.target_date} "
                                 f"rows={parsed_rows}"
                             )
-                            next_progress_rows = (
-                                parsed_rows // 250_000 + 1
-                            ) * 250_000
+                            next_progress_rows = (parsed_rows // 250_000 + 1) * 250_000
                         yield frame
-                except Exception:
-                    quarantine = self.layout.quarantine_dir(
-                        task.dataset, task.target_date
+                    _progress(
+                        f"quality dataset={task.dataset} date={task.target_date} "
+                        f"file={raw_file.path.name} input={file_stats.input_rows} "
+                        f"emitted={file_stats.emitted_rows} "
+                        f"adjacent_duplicates={file_stats.adjacent_duplicate_rows} "
+                        f"duplicate_ratio={file_stats.duplicate_ratio:.2%}"
                     )
+                except Exception:
+                    quarantine = self.layout.quarantine_dir(task.dataset, task.target_date)
                     quarantine.mkdir(parents=True, exist_ok=True)
                     destination = quarantine / (
-                        f"{raw_file.path.stem}.bad-{uuid4().hex[:8]}"
-                        f"{raw_file.path.suffix}"
+                        f"{raw_file.path.stem}.bad-{uuid4().hex[:8]}{raw_file.path.suffix}"
                     )
                     raw_file.path.replace(destination)
                     raise
@@ -373,6 +382,10 @@ class OfflineSynchronizer:
                     "source_date": task.target_date.isoformat(),
                     "date_basis": "UTC+08:00",
                     "instrument_type": raw_file.instrument_type,
+                    "input_rows": parse_stats[raw_file.path].input_rows,
+                    "emitted_rows": parse_stats[raw_file.path].emitted_rows,
+                    "adjacent_duplicate_rows": (parse_stats[raw_file.path].adjacent_duplicate_rows),
+                    "duplicate_ratio": parse_stats[raw_file.path].duplicate_ratio,
                 },
             )
         for target_date, path, row_count in outputs:
@@ -402,9 +415,7 @@ class OfflineSynchronizer:
                 task.dataset,
                 task.scope_key,
                 first_event_time=first_event_seen,
-                continuous_start=self.catalog.earliest_complete_date(
-                    task.dataset, task.scope_key
-                ),
+                continuous_start=self.catalog.earliest_complete_date(task.dataset, task.scope_key),
                 discovery_method="historical_file_stream",
                 status="observed",
             )
@@ -438,17 +449,26 @@ class OfflineSynchronizer:
                 source_date=task.target_date,
             )
             for number, link in enumerate(links):
-                url = _link_value(link, "url", "downloadUrl", "downloadLink")
+                url = _link_value(
+                    link,
+                    "url",
+                    "downloadUrl",
+                    "downloadLink",
+                    "fileHref",
+                    "href",
+                )
                 if not url:
                     continue
-                filename = Path(
-                    _link_value(link, "fileName", "filename", "name")
+                fallback_filename = (
+                    Path(urlparse(url).path).name
                     or f"{instrument_type.lower()}-{task.dataset}-{number}.zip"
+                )
+                filename = Path(
+                    _link_value(link, "fileName", "filename", "name") or fallback_filename
                 ).name
                 destination = self.layout.raw_dir(task.dataset, task.target_date) / filename
                 _progress(
-                    f"download dataset={task.dataset} date={task.target_date} "
-                    f"file={filename}"
+                    f"download dataset={task.dataset} date={task.target_date} file={filename}"
                 )
                 downloaded, digest = await client.download(url, destination)
                 _progress(
@@ -464,9 +484,7 @@ class OfflineSynchronizer:
                     )
                 )
         if not raw_files:
-            raise FileNotFoundError(
-                f"OKX has not published {task.dataset} for {task.target_date}"
-            )
+            raise FileNotFoundError(f"OKX has not published {task.dataset} for {task.target_date}")
         return raw_files
 
     async def _price_dataset(
@@ -495,9 +513,7 @@ class OfflineSynchronizer:
             )
             raw[identifier] = rows
             self._observe_api_rows(task.dataset, identifier, rows)
-            fragments.append(
-                price_candle_frame(rows, instrument_id=identifier, is_index=is_index)
-            )
+            fragments.append(price_candle_frame(rows, instrument_id=identifier, is_index=is_index))
         raw_path = self.raw.write_json_gz(task.dataset, task.target_date, raw)
         self._record_rest_raw(raw_path, task.dataset)
         return [raw_path], _concat(fragments, DATASET_STORAGE[task.dataset][0])
@@ -527,9 +543,7 @@ class OfflineSynchronizer:
             )
             raw[currency] = rows
             self._observe_api_rows(task.dataset, f"{period}:{currency}", rows)
-            fragments.append(
-                aggregate_oi_frame(rows, base_currency=currency, period=period)
-            )
+            fragments.append(aggregate_oi_frame(rows, base_currency=currency, period=period))
         raw_path = self.raw.write_json_gz(
             task.dataset,
             task.target_date,
@@ -558,9 +572,7 @@ class OfflineSynchronizer:
             )
             raw[identifier] = rows
             self._observe_api_rows(task.dataset, identifier, rows)
-            fragments.append(
-                taker_volume_frame(rows, instrument_id=identifier, period=period)
-            )
+            fragments.append(taker_volume_frame(rows, instrument_id=identifier, period=period))
         raw_path = self.raw.write_json_gz(task.dataset, task.target_date, raw)
         self._record_rest_raw(raw_path, task.dataset)
         return [raw_path], _concat(fragments, DATASET_STORAGE[task.dataset][0])
@@ -612,9 +624,7 @@ class OfflineSynchronizer:
         task: SyncTask,
     ) -> tuple[list[Path], pl.DataFrame]:
         account = next(
-            account
-            for account in self.config.private_accounts
-            if account.alias == task.scope_key
+            account for account in self.config.private_accounts if account.alias == task.scope_key
         )
         start_ms, end_ms = _day_milliseconds(task.target_date)
         rows = await client.fetch_private_rows(
@@ -658,9 +668,7 @@ class OfflineSynchronizer:
                 "okx_historical_file"
                 if task.dataset in HISTORICAL_MODULES
                 else (
-                    "okx_private_rest"
-                    if task.dataset.startswith("private_")
-                    else "okx_public_rest"
+                    "okx_private_rest" if task.dataset.startswith("private_") else "okx_public_rest"
                 )
             ),
         )
@@ -697,6 +705,58 @@ class OfflineSynchronizer:
             }
         )
 
+    def _instrument_windows(
+        self,
+    ) -> dict[str, tuple[datetime | None, datetime | None]]:
+        result: dict[str, tuple[datetime | None, datetime | None]] = {}
+        for row in self.catalog.list_instruments():
+            instrument_id = str(row.get("instrument_id") or "")
+            if not instrument_id:
+                continue
+            result[instrument_id] = (
+                _optional_datetime(row.get("listing_time")),
+                _optional_datetime(row.get("expiration_time")),
+            )
+        return result
+
+    @staticmethod
+    def _validate_known_instrument_windows(
+        frame: pl.DataFrame,
+        windows: Mapping[str, tuple[datetime | None, datetime | None]],
+        path: Path,
+    ) -> None:
+        if frame.is_empty() or "instrument_id" not in frame.columns:
+            return
+        timestamp_column = "timestamp" if "timestamp" in frame.columns else "funding_time"
+        bounds = (
+            frame.group_by("instrument_id")
+            .agg(
+                pl.col(timestamp_column).min().alias("first_timestamp"),
+                pl.col(timestamp_column).max().alias("last_timestamp"),
+            )
+            .iter_rows(named=True)
+        )
+        for row in bounds:
+            instrument_id = str(row["instrument_id"])
+            listing_time, expiration_time = windows.get(
+                instrument_id,
+                (None, None),
+            )
+            first_timestamp = row["first_timestamp"]
+            last_timestamp = row["last_timestamp"]
+            if listing_time is not None and first_timestamp < listing_time:
+                raise ArchiveDataQualityError(
+                    f"{path.name}: data predates instrument listing "
+                    f"instrument={instrument_id} data={first_timestamp.isoformat()} "
+                    f"listing={listing_time.isoformat()}"
+                )
+            if expiration_time is not None and last_timestamp > expiration_time:
+                raise ArchiveDataQualityError(
+                    f"{path.name}: data is after instrument expiration "
+                    f"instrument={instrument_id} data={last_timestamp.isoformat()} "
+                    f"expiration={expiration_time.isoformat()}"
+                )
+
     def _remember_instruments(self, frame: pl.DataFrame, target_date: date) -> None:
         if "instrument_id" not in frame.columns or frame.is_empty():
             return
@@ -714,11 +774,7 @@ class OfflineSynchronizer:
         scope_key: str,
         rows: list[list[object]],
     ) -> None:
-        timestamps = [
-            int(str(row[0]))
-            for row in rows
-            if row and str(row[0]).lstrip("-").isdigit()
-        ]
+        timestamps = [int(str(row[0])) for row in rows if row and str(row[0]).lstrip("-").isdigit()]
         if not timestamps:
             return
         first_event = datetime.fromtimestamp(min(timestamps) / 1000, tz=UTC).isoformat()
@@ -807,6 +863,18 @@ def _first_timestamp_text(frame: pl.DataFrame) -> str | None:
             value = frame.get_column(name).min()
             return value.isoformat() if value else None
     return None
+
+
+def _optional_datetime(value: object) -> datetime | None:
+    if value in {None, ""}:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _progress(message: str) -> None:
