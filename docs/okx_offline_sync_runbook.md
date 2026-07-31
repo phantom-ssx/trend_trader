@@ -115,6 +115,11 @@ sudo systemctl start trend-trader-offline-sync.timer
 回补结束或停止后再启动 timer。
 逐笔与 L2 即使被误写为 `enabled=true`，配置校验也会拒绝启动。
 
+两个 service 使用 `ProtectHome=read-only`：服务不能修改 `/home`，但可以执行
+`uv` 可能安装在 `/home/trader/.local/share/uv/` 下的 Python 运行时。不能改为
+`ProtectHome=true`，否则 `.venv/bin/python` 指向该运行时时会导致 systemd
+`status=203/EXEC`。
+
 ## 5. 查看结果和实际可得区间
 
 ```bash
