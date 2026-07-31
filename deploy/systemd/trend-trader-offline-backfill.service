@@ -1,0 +1,25 @@
+[Unit]
+Description=Trend Trader OKX offline historical data backfill
+After=network-online.target trend-trader-offline-sync.service
+Wants=network-online.target
+RequiresMountsFor=/data/market/v1/offline
+
+[Service]
+Type=oneshot
+User=trader
+Group=trader
+WorkingDirectory=/opt/trend-trader
+EnvironmentFile=/etc/trend-trader/offline-sync.env
+ExecStart=/opt/trend-trader/.venv/bin/trend-trader-offline-sync --config /etc/trend-trader/offline-sync.toml backfill
+ExecStopPost=/opt/trend-trader/.venv/bin/trend-trader-offline-notify --config /etc/trend-trader/offline-sync.toml
+Nice=1
+IOSchedulingClass=best-effort
+IOSchedulingPriority=4
+TimeoutStartSec=infinity
+TimeoutStopSec=5min
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/data/market/v1/offline

@@ -54,6 +54,7 @@ sudo -u trader /opt/trend-trader/.venv/bin/trend-trader-offline-sync \
 ```bash
 sudo cp deploy/systemd/trend-trader-offline-sync.service /etc/systemd/system/
 sudo cp deploy/systemd/trend-trader-offline-sync.timer /etc/systemd/system/
+sudo cp deploy/systemd/trend-trader-offline-backfill.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now trend-trader-offline-sync.timer
 systemctl list-timers trend-trader-offline-sync.timer
@@ -86,9 +87,33 @@ sudo -u trader sh -c '
 '
 ```
 
-完整 `backfill` 可能运行很久，建议在独立 systemd service 或 tmux 中执行。文件和
-catalog 都是幂等的；重新运行只处理未解决日期。逐笔与 L2 即使被误写为
-`enabled=true`，配置校验也会拒绝启动。
+完整 `backfill` 可能运行很久，仓库提供手工启动、不会随开机自动运行的独立
+systemd service：
+
+```bash
+sudo cp deploy/systemd/trend-trader-offline-backfill.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl stop trend-trader-offline-sync.timer
+sudo systemctl start trend-trader-offline-backfill.service
+
+systemctl status trend-trader-offline-backfill.service
+journalctl -fu trend-trader-offline-backfill.service
+```
+
+停止回补：
+
+```bash
+sudo systemctl stop trend-trader-offline-backfill.service
+sudo systemctl start trend-trader-offline-sync.timer
+```
+
+停止后再次 `start` 是安全的，catalog 会让它只处理未解决日期。service 使用
+`trader:trader`、`/etc/trend-trader/offline-sync.toml` 和
+`/etc/trend-trader/offline-sync.env`，结束后通过同一 Bark outbox 发送结果。
+不要对该 service 执行 `systemctl enable`，避免服务器每次启动都自动开始全量回补。
+启动回补前暂停 daily timer，避免长时间回补期间定时任务重复竞争 catalog 锁；
+回补结束或停止后再启动 timer。
+逐笔与 L2 即使被误写为 `enabled=true`，配置校验也会拒绝启动。
 
 ## 5. 查看结果和实际可得区间
 
