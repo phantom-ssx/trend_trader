@@ -22,6 +22,7 @@ from trend_trader.data.offline.storage import sha256_file
 HISTORICAL_LINK_PATH = "/api/v5/public/market-data-history"
 OKX_SOURCE_TIMEZONE = timezone(timedelta(hours=8))
 INSTRUMENTS_PATH = "/api/v5/public/instruments"
+CANDLES_PATH = "/api/v5/market/history-candles"
 MARK_CANDLES_PATH = "/api/v5/market/history-mark-price-candles"
 INDEX_CANDLES_PATH = "/api/v5/market/history-index-candles"
 OPEN_INTEREST_PATH = "/api/v5/rubik/stat/contracts/open-interest-volume"
@@ -40,10 +41,20 @@ PRIVATE_PATHS = {
     "private_fills": "/api/v5/trade/fills-history",
     "private_bills": "/api/v5/account/bills-archive",
 }
+RETRYABLE_API_ERROR_CODES = {"50004", "50011", "50013", "50040"}
 
 
 class OkxApiError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
 
 
 class AsyncRateGate:
@@ -137,14 +148,25 @@ class OkxOfflineClient:
                     raise OkxApiError(f"unexpected OKX response for {path}")
                 code = str(payload.get("code", "0"))
                 if code not in {"0", ""}:
-                    raise OkxApiError(f"OKX API {path}: {code} {payload.get('msg', '')}")
+                    raise OkxApiError(
+                        f"OKX API {path}: {code} {payload.get('msg', '')}",
+                        code=code,
+                        retryable=code in RETRYABLE_API_ERROR_CODES,
+                    )
                 return payload
             except (httpx.HTTPError, json.JSONDecodeError, OkxApiError) as exc:
                 last_error = exc
+                if isinstance(exc, OkxApiError) and not exc.retryable:
+                    break
                 if attempt + 1 == self.config.max_retries:
                     break
                 await asyncio.sleep(min(2**attempt, 16))
-        raise OkxApiError(f"request failed after retries: {path}") from last_error
+        if isinstance(last_error, OkxApiError):
+            raise last_error
+        raise OkxApiError(
+            f"request failed after {self.config.max_retries} attempts: {path}: {last_error}",
+            retryable=True,
+        ) from last_error
 
     async def fetch_instruments(self) -> list[dict[str, object]]:
         result: list[dict[str, object]] = []
@@ -258,6 +280,37 @@ class OkxOfflineClient:
                     "bar": "1m",
                     "after": cursor,
                     "limit": 100,
+                },
+            )
+            page = _array_rows(payload)
+            if not page:
+                break
+            rows.extend(row for row in page if start_ms <= int(str(row[0])) < end_ms)
+            oldest = min(int(str(row[0])) for row in page)
+            if oldest <= start_ms or oldest >= cursor:
+                break
+            cursor = oldest - 1
+        return rows
+
+    async def fetch_candles(
+        self,
+        *,
+        instrument_id: str,
+        start_ms: int,
+        end_ms: int,
+    ) -> list[list[object]]:
+        """Fetch one instrument's confirmed 1m candles in ``[start_ms, end_ms)``."""
+        rows: list[list[object]] = []
+        cursor = end_ms
+        while cursor > start_ms:
+            payload = await self.request(
+                "GET",
+                CANDLES_PATH,
+                params={
+                    "instId": instrument_id,
+                    "bar": "1m",
+                    "after": cursor,
+                    "limit": 300,
                 },
             )
             page = _array_rows(payload)

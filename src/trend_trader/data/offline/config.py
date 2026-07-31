@@ -25,7 +25,7 @@ class DatasetOptions(BaseModel):
 class DatasetsConfig(BaseModel):
     candles: DatasetOptions = Field(
         default_factory=lambda: DatasetOptions(
-            start=date(2023, 7, 1),
+            start=date(2020, 1, 2),
             mature_lag_days=2,
         )
     )

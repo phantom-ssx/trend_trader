@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 import sys
 from collections.abc import Callable, Iterable, Mapping
@@ -14,9 +16,13 @@ import polars as pl
 
 from trend_trader.data.offline.catalog import OfflineCatalog
 from trend_trader.data.offline.client import (
+    CANDLES_PATH,
+    INDEX_CANDLES_PATH,
+    MARK_CANDLES_PATH,
     OPEN_INTEREST_PATH,
     RATIO_PATHS,
     TAKER_VOLUME_PATH,
+    OkxApiError,
     OkxOfflineClient,
 )
 from trend_trader.data.offline.config import DatasetOptions, OfflineSyncConfig
@@ -25,6 +31,7 @@ from trend_trader.data.offline.schemas import (
     ArchiveDataQualityError,
     ArchiveParseStats,
     aggregate_oi_frame,
+    candle_frame,
     iter_candle_archive_batches,
     iter_funding_archive_batches,
     price_candle_frame,
@@ -44,6 +51,7 @@ from trend_trader.data.offline.storage import (
 )
 
 HISTORICAL_MODULES = {"candles": 2, "funding_rates": 3}
+CANDLE_ARCHIVE_START = date(2023, 7, 1)
 RETENTION_START_DAYS: dict[str, int | dict[str, int]] = {
     "aggregate_open_interest": {"5m": 2, "1H": 30, "1D": 180},
     "private_final_orders": 90,
@@ -56,6 +64,7 @@ RATIO_STARTS = {
     "top_trader_position": date(2024, 3, 22),
 }
 RATIO_TYPES = tuple(RATIO_PATHS)
+PERMANENT_IDENTIFIER_ERROR_CODES = {"51001"}
 
 
 @dataclass(frozen=True)
@@ -192,9 +201,11 @@ class OfflineSynchronizer:
                         )
                         result = await self._execute(client, task)
                         report["results"].append(asdict(result))
+                        error_text = f" error={result.error}" if result.error else ""
                         _progress(
                             f"finish dataset={task.dataset} date={task.target_date} "
                             f"scope={task.scope_key} status={result.status} rows={result.rows}"
+                            f"{error_text}"
                         )
                 failures = [row for row in report["results"] if row["status"] == "failed"]
                 report["status"] = "partial_failure" if failures else "success"
@@ -219,9 +230,11 @@ class OfflineSynchronizer:
 
     async def _execute(self, client: OkxOfflineClient, task: SyncTask) -> DatasetResult:
         try:
-            if task.dataset in HISTORICAL_MODULES:
+            if task.dataset == "candles" and task.target_date < CANDLE_ARCHIVE_START:
+                files, frame = await self._candle_rest_dataset(client, task)
+            elif task.dataset in HISTORICAL_MODULES:
                 return await self._execute_historical_file_dataset(client, task)
-            if task.dataset in {"mark_price_candles", "index_price_candles"}:
+            elif task.dataset in {"mark_price_candles", "index_price_candles"}:
                 files, frame = await self._price_dataset(client, task)
             elif task.dataset == "aggregate_open_interest":
                 files, frame = await self._open_interest_dataset(client, task)
@@ -298,6 +311,7 @@ class OfflineSynchronizer:
         task: SyncTask,
     ) -> DatasetResult:
         raw_files = await self._download_historical_files(client, task)
+        rest_boundary = self._rest_candle_boundary(task)
         first_event_seen: str | None = None
         parsed_rows = 0
         next_progress_rows = 250_000
@@ -326,6 +340,8 @@ class OfflineSynchronizer:
                             instrument_windows,
                             raw_file.path,
                         )
+                        if rest_boundary is not None:
+                            self._validate_candle_overlap(frame, rest_boundary, raw_file.path)
                         self._remember_instruments(frame, task.target_date)
                         first_event = _first_timestamp_text(frame)
                         if first_event and (
@@ -372,6 +388,8 @@ class OfflineSynchronizer:
             compaction_threads=self.config.compaction_threads,
         )
         outputs, input_rows = repository.write_batches(batches())
+        if task.dataset == "candles" and task.target_date == CANDLE_ARCHIVE_START:
+            self._validate_candle_boundary_continuity()
         for raw_file in raw_files:
             self.catalog.record_artifact(
                 raw_file.path,
@@ -495,25 +513,169 @@ class OfflineSynchronizer:
         start_ms, end_ms = _day_milliseconds(task.target_date)
         catalog = self.catalog.list_instruments()
         is_index = task.dataset == "index_price_candles"
-        identifiers = sorted(
-            {
-                str(row["index_id"] if is_index else row["instrument_id"])
-                for row in catalog
-                if row.get("index_id" if is_index else "instrument_id")
-            }
-        )
+        identifier_field = "index_id" if is_index else "instrument_id"
+        rows_by_identifier: dict[str, list[Mapping[str, object]]] = {}
+        for row in catalog:
+            identifier = str(row.get(identifier_field) or "")
+            instrument_type = str(row.get("instrument_type") or "").upper()
+            if (
+                identifier
+                and instrument_type in {"SWAP", "FUTURES"}
+                and _instrument_active_on_date(row, task.target_date)
+            ):
+                rows_by_identifier.setdefault(identifier, []).append(row)
         raw: dict[str, object] = {}
         fragments: list[pl.DataFrame] = []
-        for identifier in identifiers:
-            rows = await client.fetch_price_candles(
-                instrument_id=identifier,
-                start_ms=start_ms,
-                end_ms=end_ms,
-                index=is_index,
+        skipped_invalid: dict[str, object] = {}
+        new_invalid: dict[str, object] = {}
+        endpoint = INDEX_CANDLES_PATH if is_index else MARK_CANDLES_PATH
+        for identifier, source_rows in sorted(rows_by_identifier.items()):
+            fingerprint = _instrument_source_fingerprint(source_rows)
+            cached = self.catalog.cached_invalid_identifier(
+                task.dataset,
+                identifier,
+                fingerprint,
             )
+            if cached:
+                self.catalog.note_invalid_identifier_skipped(
+                    task.dataset,
+                    identifier,
+                    task.target_date,
+                )
+                skipped_invalid[identifier] = {
+                    "error_code": cached["error_code"],
+                    "error_message": cached["error_message"],
+                    "first_failed_at": cached["first_failed_at"],
+                }
+                continue
+            try:
+                rows = await client.fetch_price_candles(
+                    instrument_id=identifier,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    index=is_index,
+                )
+            except OkxApiError as exc:
+                if exc.code not in PERMANENT_IDENTIFIER_ERROR_CODES:
+                    raise
+                error_message = str(exc)
+                self.catalog.record_invalid_identifier(
+                    task.dataset,
+                    identifier,
+                    source_fingerprint=fingerprint,
+                    endpoint=endpoint,
+                    error_code=str(exc.code),
+                    error_message=error_message,
+                    target_date=task.target_date,
+                )
+                new_invalid[identifier] = {
+                    "error_code": exc.code,
+                    "error_message": error_message,
+                }
+                _progress(
+                    f"exclude-invalid dataset={task.dataset} identifier={identifier} "
+                    f"code={exc.code}"
+                )
+                continue
+            self.catalog.clear_invalid_identifier(task.dataset, identifier)
             raw[identifier] = rows
             self._observe_api_rows(task.dataset, identifier, rows)
             fragments.append(price_candle_frame(rows, instrument_id=identifier, is_index=is_index))
+        raw["_request_metadata"] = {
+            "eligible_identifiers": len(rows_by_identifier),
+            "skipped_cached_invalid": skipped_invalid,
+            "new_invalid": new_invalid,
+        }
+        if skipped_invalid:
+            _progress(
+                f"skip-cached-invalid dataset={task.dataset} "
+                f"count={len(skipped_invalid)}"
+            )
+        raw_path = self.raw.write_json_gz(task.dataset, task.target_date, raw)
+        self._record_rest_raw(raw_path, task.dataset)
+        return [raw_path], _concat(fragments, DATASET_STORAGE[task.dataset][0])
+
+    async def _candle_rest_dataset(
+        self,
+        client: OkxOfflineClient,
+        task: SyncTask,
+    ) -> tuple[list[Path], pl.DataFrame]:
+        start_ms, end_ms = _day_milliseconds(task.target_date)
+        rows_by_identifier: dict[str, list[Mapping[str, object]]] = {}
+        for row in self.catalog.list_instruments():
+            identifier = str(row.get("instrument_id") or "")
+            instrument_type = str(row.get("instrument_type") or "").upper()
+            if (
+                identifier
+                and instrument_type in {"SWAP", "FUTURES"}
+                and _instrument_active_on_date(row, task.target_date)
+            ):
+                rows_by_identifier.setdefault(identifier, []).append(row)
+        raw: dict[str, object] = {}
+        fragments: list[pl.DataFrame] = []
+        skipped_invalid: dict[str, object] = {}
+        new_invalid: dict[str, object] = {}
+        for identifier, source_rows in sorted(rows_by_identifier.items()):
+            fingerprint = _instrument_source_fingerprint(source_rows)
+            cached = self.catalog.cached_invalid_identifier(
+                task.dataset,
+                identifier,
+                fingerprint,
+            )
+            if cached:
+                self.catalog.note_invalid_identifier_skipped(
+                    task.dataset,
+                    identifier,
+                    task.target_date,
+                )
+                skipped_invalid[identifier] = {
+                    "error_code": cached["error_code"],
+                    "error_message": cached["error_message"],
+                    "first_failed_at": cached["first_failed_at"],
+                }
+                continue
+            try:
+                rows = await client.fetch_candles(
+                    instrument_id=identifier,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                )
+            except OkxApiError as exc:
+                if exc.code not in PERMANENT_IDENTIFIER_ERROR_CODES:
+                    raise
+                error_message = str(exc)
+                self.catalog.record_invalid_identifier(
+                    task.dataset,
+                    identifier,
+                    source_fingerprint=fingerprint,
+                    endpoint=CANDLES_PATH,
+                    error_code=str(exc.code),
+                    error_message=error_message,
+                    target_date=task.target_date,
+                )
+                new_invalid[identifier] = {
+                    "error_code": exc.code,
+                    "error_message": error_message,
+                }
+                _progress(
+                    f"exclude-invalid dataset={task.dataset} identifier={identifier} "
+                    f"code={exc.code}"
+                )
+                continue
+            self.catalog.clear_invalid_identifier(task.dataset, identifier)
+            raw[identifier] = rows
+            self._observe_api_rows(task.dataset, identifier, rows)
+            fragments.append(candle_frame(rows, instrument_id=identifier))
+        raw["_request_metadata"] = {
+            "eligible_identifiers": len(rows_by_identifier),
+            "skipped_cached_invalid": skipped_invalid,
+            "new_invalid": new_invalid,
+        }
+        if skipped_invalid:
+            _progress(
+                f"skip-cached-invalid dataset={task.dataset} "
+                f"count={len(skipped_invalid)}"
+            )
         raw_path = self.raw.write_json_gz(task.dataset, task.target_date, raw)
         self._record_rest_raw(raw_path, task.dataset)
         return [raw_path], _concat(fragments, DATASET_STORAGE[task.dataset][0])
@@ -665,10 +827,16 @@ class OfflineSynchronizer:
             row_group_size=self.config.parquet_row_group_size,
             account_alias=task.scope_key if task.dataset.startswith("private_") else None,
             source_name=(
-                "okx_historical_file"
-                if task.dataset in HISTORICAL_MODULES
+                "okx_public_rest"
+                if task.dataset == "candles" and task.target_date < CANDLE_ARCHIVE_START
                 else (
-                    "okx_private_rest" if task.dataset.startswith("private_") else "okx_public_rest"
+                    "okx_historical_file"
+                    if task.dataset in HISTORICAL_MODULES
+                    else (
+                        "okx_private_rest"
+                        if task.dataset.startswith("private_")
+                        else "okx_public_rest"
+                    )
                 )
             ),
         )
@@ -704,6 +872,78 @@ class OfflineSynchronizer:
                 if row.get("instrument_id")
             }
         )
+
+    def _rest_candle_boundary(self, task: SyncTask) -> pl.DataFrame | None:
+        if task.dataset != "candles" or task.target_date != CANDLE_ARCHIVE_START:
+            return None
+        path = self.layout.normalized_path("candles", CANDLE_ARCHIVE_START - timedelta(days=1))
+        if not path.exists():
+            return None
+        return pl.read_parquet(path)
+
+    @staticmethod
+    def _validate_candle_overlap(
+        archive: pl.DataFrame,
+        rest: pl.DataFrame,
+        source_path: Path,
+    ) -> None:
+        keys = ["venue", "instrument_id", "bar_type", "timestamp"]
+        values = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "volume_ccy",
+            "volume_quote",
+            "confirm",
+        ]
+        overlap = archive.join(rest, on=keys, how="inner", suffix="_rest")
+        if overlap.is_empty():
+            return
+        matches = pl.all_horizontal(
+            [pl.col(name).eq_missing(pl.col(f"{name}_rest")) for name in values]
+        )
+        conflicts = overlap.filter(~matches)
+        if conflicts.height:
+            row = conflicts.select(*keys).row(0, named=True)
+            raise ArchiveDataQualityError(
+                f"{source_path.name}: REST/archive candle conflict at source boundary "
+                f"instrument={row['instrument_id']} timestamp={row['timestamp'].isoformat()}"
+            )
+
+    def _validate_candle_boundary_continuity(self) -> None:
+        previous_path = self.layout.normalized_path(
+            "candles", CANDLE_ARCHIVE_START - timedelta(days=1)
+        )
+        current_path = self.layout.normalized_path("candles", CANDLE_ARCHIVE_START)
+        if not previous_path.exists() or not current_path.exists():
+            return
+        previous = (
+            pl.scan_parquet(previous_path)
+            .group_by("instrument_id")
+            .agg(pl.col("timestamp").max().alias("previous_timestamp"))
+            .collect()
+        )
+        current = (
+            pl.scan_parquet(current_path)
+            .group_by("instrument_id")
+            .agg(pl.col("timestamp").min().alias("current_timestamp"))
+            .collect()
+        )
+        common = previous.join(current, on="instrument_id", how="inner")
+        gaps = common.filter(
+            pl.col("current_timestamp") - pl.col("previous_timestamp")
+            != timedelta(minutes=1)
+        )
+        if gaps.height:
+            row = gaps.row(0, named=True)
+            raise ArchiveDataQualityError(
+                "REST/archive candle discontinuity at source boundary "
+                f"instrument={row['instrument_id']} "
+                f"previous={row['previous_timestamp'].isoformat()} "
+                f"current={row['current_timestamp'].isoformat()}"
+            )
 
     def _instrument_windows(
         self,
@@ -875,6 +1115,34 @@ def _optional_datetime(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _instrument_active_on_date(row: Mapping[str, object], target_date: date) -> bool:
+    start = datetime.combine(target_date, time.min, tzinfo=UTC)
+    end = start + timedelta(days=1)
+    listing_time = _optional_datetime(row.get("listing_time"))
+    expiration_time = _optional_datetime(row.get("expiration_time"))
+    return (listing_time is None or listing_time < end) and (
+        expiration_time is None or expiration_time > start
+    )
+
+
+def _instrument_source_fingerprint(rows: Iterable[Mapping[str, object]]) -> str:
+    fields = (
+        "instrument_id",
+        "instrument_type",
+        "index_id",
+        "listing_time",
+        "expiration_time",
+        "category",
+        "rule_type",
+    )
+    payload = sorted(
+        ({field: str(row.get(field) or "") for field in fields} for row in rows),
+        key=lambda item: tuple(item[field] for field in fields),
+    )
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _progress(message: str) -> None:

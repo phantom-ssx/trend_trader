@@ -14,7 +14,7 @@ raw_retention = "permanent"
 
 [datasets.candles]
 enabled = true
-start = 2023-07-01
+start = 2020-01-02
 mature_lag_days = 2
 
 [datasets.funding_rates]

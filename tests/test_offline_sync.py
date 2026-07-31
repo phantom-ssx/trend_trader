@@ -9,9 +9,11 @@ from pathlib import Path
 
 import httpx
 import polars as pl
+import pyarrow.parquet as pq
 import pytest
 
-from trend_trader.data.offline.client import OkxOfflineClient
+from trend_trader.data.offline.catalog import OfflineCatalog
+from trend_trader.data.offline.client import OkxApiError, OkxOfflineClient
 from trend_trader.data.offline.config import (
     DatasetOptions,
     DatasetsConfig,
@@ -23,6 +25,7 @@ from trend_trader.data.offline.schemas import (
     CANDLE_SCHEMA,
     ArchiveDataQualityError,
     ArchiveParseStats,
+    candle_frame,
     iter_candle_archive_batches,
     parse_candle_archive,
 )
@@ -51,6 +54,84 @@ def test_deferred_large_datasets_cannot_be_enabled() -> None:
         DatasetsConfig(public_trades=DatasetOptions(enabled=True))
 
 
+def test_instrument_catalog_prefers_official_underlying_for_index_id(tmp_path: Path) -> None:
+    catalog = OfflineCatalog(tmp_path)
+
+    catalog.upsert_instrument(
+        {
+            "instId": "AAVE-USD_UM_XPERP-310704",
+            "instType": "FUTURES",
+            "baseCcy": "AAVE",
+            "uly": "AAVE-USD",
+        },
+        datetime(2026, 7, 31, tzinfo=UTC),
+    )
+
+    assert catalog.list_instruments()[0]["index_id"] == "AAVE-USD"
+
+
+def test_permanent_okx_api_error_is_not_retried_and_keeps_details(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.max_retries = 4
+    request_count = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(
+            200,
+            json={"code": "51001", "msg": "Instrument ID doesn't exist", "data": []},
+        )
+
+    async def run() -> None:
+        async with OkxOfflineClient(
+            config,
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            with pytest.raises(OkxApiError, match="51001") as caught:
+                await client.fetch_price_candles(
+                    instrument_id="AAVE-USD_UM_XPERP",
+                    start_ms=0,
+                    end_ms=60_000,
+                    index=True,
+                )
+            assert caught.value.code == "51001"
+
+    asyncio.run(run())
+    assert request_count == 1
+
+
+def test_retryable_okx_api_error_uses_configured_retries(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.max_retries = 3
+    request_count = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(
+            200,
+            json={"code": "50011", "msg": "Rate limit reached", "data": []},
+        )
+
+    async def run() -> None:
+        async with OkxOfflineClient(
+            config,
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            with pytest.raises(OkxApiError, match="50011") as caught:
+                await client.fetch_price_candles(
+                    instrument_id="BTC-USDT",
+                    start_ms=0,
+                    end_ms=60_000,
+                    index=True,
+                )
+            assert caught.value.retryable is True
+
+    asyncio.run(run())
+    assert request_count == 3
+
+
 def test_daily_plan_only_scans_recent_mature_window(tmp_path: Path) -> None:
     config = _config(tmp_path)
     config.datasets.candles.enabled = True
@@ -66,6 +147,20 @@ def test_daily_plan_only_scans_recent_mature_window(tmp_path: Path) -> None:
     assert len(tasks) == 14
     assert tasks[0].target_date == date(2026, 7, 15)
     assert tasks[-1].target_date == date(2026, 7, 28)
+
+
+def test_default_candle_backfill_starts_at_rest_history_boundary(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.datasets.candles.enabled = True
+    sync = OfflineSynchronizer(config)
+
+    tasks = sync.plan(
+        mode="backfill",
+        today=date(2020, 1, 5),
+        datasets={"candles"},
+    )
+
+    assert tasks[0].target_date == date(2020, 1, 2)
 
 
 def test_oi_retention_is_planned_separately_by_period(tmp_path: Path) -> None:
@@ -400,6 +495,43 @@ def test_client_flattens_official_historical_link_response(tmp_path: Path) -> No
     assert links[0]["fileName"] == "allswap.zip"
 
 
+def test_client_fetches_rest_candles_with_backward_pagination(tmp_path: Path) -> None:
+    start = int(datetime(2020, 1, 2, tzinfo=UTC).timestamp() * 1000)
+    end = start + 86_400_000
+    requested_cursors: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v5/market/history-candles"
+        assert request.url.params["instId"] == "BTC-USDT-SWAP"
+        assert request.url.params["bar"] == "1m"
+        assert request.url.params["limit"] == "300"
+        cursor = int(request.url.params["after"])
+        requested_cursors.append(cursor)
+        timestamp = end - 60_000 if len(requested_cursors) == 1 else start
+        return httpx.Response(
+            200,
+            json={
+                "code": "0",
+                "data": [[timestamp, "1", "2", "0.5", "1.5", "10", "2", "15", "1"]],
+            },
+        )
+
+    config = _config(tmp_path)
+    transport = httpx.MockTransport(handler)
+
+    async def run() -> list[list[object]]:
+        async with OkxOfflineClient(config, transport=transport) as client:
+            return await client.fetch_candles(
+                instrument_id="BTC-USDT-SWAP",
+                start_ms=start,
+                end_ms=end,
+            )
+
+    rows = asyncio.run(run())
+    assert [int(str(row[0])) for row in rows] == [end - 60_000, start]
+    assert requested_cursors == [end, end - 60_001]
+
+
 def test_mark_price_range_run_writes_one_all_market_file(tmp_path: Path) -> None:
     target = date(2026, 7, 28)
     timestamp = int(datetime(2026, 7, 28, tzinfo=UTC).timestamp() * 1000)
@@ -455,6 +587,192 @@ def test_mark_price_range_run_writes_one_all_market_file(tmp_path: Path) -> None
     output = OfflineLayout(tmp_path).normalized_path("mark_price_candles", target)
     assert output.exists()
     assert pl.read_parquet(output).height == 2
+
+
+def test_price_run_filters_listing_window_and_caches_invalid_identifier(
+    tmp_path: Path,
+) -> None:
+    first = date(2020, 1, 11)
+    second = first + timedelta(days=1)
+    config = _config(tmp_path)
+    config.datasets.index_price_candles.enabled = True
+    config.datasets.index_price_candles.start = first
+    calls: list[tuple[str, date]] = []
+
+    class FakeClient:
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def fetch_instruments(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "instType": "SWAP",
+                    "baseCcy": "BTC",
+                    "uly": "BTC-USDT",
+                    "listTime": "1577836800000",
+                },
+                {
+                    "instId": "AAVE-USD_UM_XPERP-310704",
+                    "instType": "FUTURES",
+                    "baseCcy": "AAVE",
+                    "uly": "AAVE-USD",
+                    "listTime": "1577836800000",
+                },
+                {
+                    "instId": "FUTURE-USDT-SWAP",
+                    "instType": "SWAP",
+                    "baseCcy": "FUTURE",
+                    "uly": "FUTURE-USDT",
+                    "listTime": "1767225600000",
+                },
+            ]
+
+        async def fetch_price_candles(
+            self,
+            *,
+            instrument_id: str,
+            start_ms: int,
+            end_ms: int,
+            index: bool,
+        ) -> list[list[object]]:
+            assert index is True
+            target = datetime.fromtimestamp(start_ms / 1000, tz=UTC).date()
+            calls.append((instrument_id, target))
+            if instrument_id == "AAVE-USD":
+                raise OkxApiError(
+                    "OKX API index: 51001 Instrument ID doesn't exist",
+                    code="51001",
+                )
+            return [[start_ms, "1", "2", "0.5", "1.5", "1"]]
+
+    synchronizer = OfflineSynchronizer(config, client_factory=FakeClient)
+    synchronizer._check_disk = lambda: None
+    report = asyncio.run(
+        synchronizer.run(
+            mode="range",
+            start=first,
+            end=second,
+            datasets={"index_price_candles"},
+            today=second + timedelta(days=1),
+        )
+    )
+
+    assert report["status"] == "success", json.dumps(report, indent=2)
+    listed_day = date(2026, 1, 2)
+    listed_report = asyncio.run(
+        synchronizer.run(
+            mode="range",
+            start=listed_day,
+            end=listed_day,
+            datasets={"index_price_candles"},
+            today=listed_day + timedelta(days=1),
+        )
+    )
+    assert listed_report["status"] == "success", json.dumps(listed_report, indent=2)
+    assert calls == [
+        ("AAVE-USD", first),
+        ("BTC-USDT", first),
+        ("BTC-USDT", second),
+        ("BTC-USDT", listed_day),
+        ("FUTURE-USDT", listed_day),
+    ]
+    invalid = synchronizer.catalog.invalid_identifier_summary()
+    assert len(invalid) == 1
+    assert invalid[0]["identifier"] == "AAVE-USD"
+    assert invalid[0]["failure_count"] == 1
+    assert invalid[0]["skip_count"] == 2
+    assert invalid[0]["last_skipped_target_date"] == listed_day.isoformat()
+
+
+def test_pre_archive_candles_use_rest_and_active_instrument_windows(tmp_path: Path) -> None:
+    target = date(2020, 1, 2)
+    timestamp = int(datetime(2020, 1, 2, tzinfo=UTC).timestamp() * 1000)
+    config = _config(tmp_path)
+    config.datasets.candles.enabled = True
+    requested: list[str] = []
+
+    class FakeRestClient:
+        async def __aenter__(self) -> FakeRestClient:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def fetch_instruments(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "instType": "SWAP",
+                    "baseCcy": "BTC",
+                    "listTime": str(timestamp - 86_400_000),
+                },
+                {
+                    "instId": "ETH-USDT-SWAP",
+                    "instType": "SWAP",
+                    "baseCcy": "ETH",
+                    "listTime": str(timestamp + 86_400_000),
+                },
+                {
+                    "instId": "BTC-USD-191227",
+                    "instType": "FUTURES",
+                    "baseCcy": "BTC",
+                    "expTime": str(timestamp - 86_400_000),
+                },
+            ]
+
+        async def fetch_candles(
+            self,
+            *,
+            instrument_id: str,
+            start_ms: int,
+            end_ms: int,
+        ) -> list[list[object]]:
+            requested.append(instrument_id)
+            assert start_ms <= timestamp < end_ms
+            return [[timestamp, "1", "2", "0.5", "1.5", "10", "2", "15", "1"]]
+
+    synchronizer = OfflineSynchronizer(config, client_factory=FakeRestClient)
+    synchronizer._check_disk = lambda: None
+    report = asyncio.run(
+        synchronizer.run(
+            mode="range",
+            start=target,
+            end=target,
+            datasets={"candles"},
+            today=target + timedelta(days=2),
+        )
+    )
+
+    assert report["status"] == "success", json.dumps(report, indent=2)
+    assert requested == ["BTC-USDT-SWAP"]
+    output = OfflineLayout(tmp_path).normalized_path("candles", target)
+    stored = pl.read_parquet(output)
+    assert stored.get_column("instrument_id").to_list() == ["BTC-USDT-SWAP"]
+    assert pq.read_metadata(output).metadata[b"source_name"] == b"okx_public_rest"
+    raw_files = list(OfflineLayout(tmp_path).raw_dir("candles", target).glob("*.json.gz"))
+    assert len(raw_files) == 1
+
+
+def test_rest_archive_overlap_must_have_identical_candles(tmp_path: Path) -> None:
+    timestamp = int(datetime(2023, 6, 30, 23, 59, tzinfo=UTC).timestamp() * 1000)
+    rest = candle_frame(
+        [[timestamp, "1", "2", "0.5", "1.5", "10", "2", "15", "1"]],
+        instrument_id="BTC-USDT-SWAP",
+    )
+
+    OfflineSynchronizer._validate_candle_overlap(rest, rest, tmp_path / "archive.zip")
+
+    conflicting = rest.with_columns(pl.lit(1.6).alias("close"))
+    with pytest.raises(ArchiveDataQualityError, match="REST/archive candle conflict"):
+        OfflineSynchronizer._validate_candle_overlap(
+            conflicting,
+            rest,
+            tmp_path / "archive.zip",
+        )
 
 
 def test_historical_candles_run_uses_streaming_compaction(tmp_path: Path) -> None:

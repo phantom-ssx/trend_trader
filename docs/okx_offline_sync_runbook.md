@@ -75,7 +75,12 @@ SQLite outbox，下一次运行会重试。
 # 指定数据集和区间
 sudo -u trader /opt/trend-trader/.venv/bin/trend-trader-offline-sync \
   --config /etc/trend-trader/offline-sync.toml range \
-  --start 2023-07-01 --end 2023-07-31 --dataset candles
+  --start 2020-01-02 --end 2020-01-03 --dataset candles
+
+# 验证 REST/批量文件切换边界及重叠一致性
+sudo -u trader /opt/trend-trader/.venv/bin/trend-trader-offline-sync \
+  --config /etc/trend-trader/offline-sync.toml range \
+  --start 2023-06-30 --end 2023-07-01 --dataset candles
 
 # 按每个数据集配置的最早时间回补所有缺口
 sudo -u trader sh -c '
@@ -87,7 +92,9 @@ sudo -u trader sh -c '
 '
 ```
 
-完整 `backfill` 可能运行很久，仓库提供手工启动、不会随开机自动运行的独立
+普通 1m K 线在 `2023-07-01` 前按合约调用 REST，每次最多返回 300 根，因此完整
+回补的请求数远多于批量文件下载。完整 `backfill` 可能运行很久，仓库提供手工启动、
+不会随开机自动运行的独立
 systemd service：
 
 ```bash
@@ -129,6 +136,9 @@ sudo -u trader /opt/trend-trader/.venv/bin/trend-trader-offline-sync \
 sudo -u trader /opt/trend-trader/.venv/bin/trend-trader-offline-sync \
   --config /etc/trend-trader/offline-sync.toml availability
 
+sudo -u trader /opt/trend-trader/.venv/bin/trend-trader-offline-sync \
+  --config /etc/trend-trader/offline-sync.toml invalid-identifiers
+
 journalctl -u trend-trader-offline-sync.service -n 200 --no-pager
 ```
 
@@ -136,13 +146,17 @@ journalctl -u trend-trader-offline-sync.service -n 200 --no-pager
 候选起点与下载过程中观测到的首条事件时间。最终研究区间应由实际使用的数据集求
 交集，不应直接使用某个全局固定起点。
 
+`invalid-identifiers` 显示 OKX 明确返回 `51001` 的标识、原始错误、实际失败次数和
+缓存命中的跳过次数。未上市合约不在此列表中：程序按 `listTime` 逐日判断，上市前
+跳过、上市日开始请求。合约元数据变化会使旧排除记录自动失效并触发重新探测。
+
 私有 API 只能自动回补近 3 个月。更早的最终订单、成交和账单，需要从 OKX 网页生成
 2021-01-28 以来的 Trading history 报表；这部分是一次性人工导出流程，不应把网页登录
 凭证交给定时下载程序。
 
 ## 6. 小内存服务器与 OOM
 
-历史 K 线和资金费率使用有界内存流程：ZIP 原始文本行先以常量内存折叠连续完全
+`2023-07-01` 起的历史 K 线和资金费率使用有界内存流程：ZIP 原始文本行先以常量内存折叠连续完全
 重复行，再进行 CSV 解析并按固定批次写临时 Parquet fragment；DuckDB 在固定内存
 上限内完成主键去重和外部排序，PyArrow 再分批写入最终日级 Parquet。相关配置为：
 

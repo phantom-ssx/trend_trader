@@ -100,6 +100,22 @@ class OfflineCatalog:
                     last_error TEXT,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS invalid_identifiers (
+                    dataset TEXT NOT NULL,
+                    identifier TEXT NOT NULL,
+                    source_fingerprint TEXT NOT NULL,
+                    endpoint TEXT NOT NULL,
+                    error_code TEXT NOT NULL,
+                    error_message TEXT NOT NULL,
+                    first_failed_at TEXT NOT NULL,
+                    last_failed_at TEXT NOT NULL,
+                    last_target_date TEXT NOT NULL,
+                    failure_count INTEGER NOT NULL DEFAULT 1,
+                    last_skipped_at TEXT,
+                    last_skipped_target_date TEXT,
+                    skip_count INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (dataset, identifier)
+                );
                 """
             )
 
@@ -230,8 +246,10 @@ class OfflineCatalog:
         base_currency = str(row.get("base_currency") or row.get("baseCcy") or "")
         if not base_currency:
             base_currency = instrument_id.split("-", maxsplit=1)[0]
-        parts = instrument_id.split("-")
-        index_id = "-".join(parts[:2]) if len(parts) >= 2 else None
+        index_id = str(row.get("index_id") or row.get("uly") or "") or None
+        if index_id is None:
+            parts = instrument_id.split("-")
+            index_id = "-".join(parts[:2]) if len(parts) >= 2 else None
         category = str(row.get("instCategory") or row.get("category") or "crypto")
         listing_time = _optional_time_text(row.get("listing_time") or row.get("listTime"))
         expiration_time = _optional_time_text(row.get("expiration_time") or row.get("expTime"))
@@ -272,6 +290,100 @@ class OfflineCatalog:
         with self.connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM instruments ORDER BY instrument_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def cached_invalid_identifier(
+        self,
+        dataset: str,
+        identifier: str,
+        source_fingerprint: str,
+    ) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM invalid_identifiers
+                WHERE dataset=? AND identifier=? AND source_fingerprint=?
+                """,
+                (dataset, identifier, source_fingerprint),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def record_invalid_identifier(
+        self,
+        dataset: str,
+        identifier: str,
+        *,
+        source_fingerprint: str,
+        endpoint: str,
+        error_code: str,
+        error_message: str,
+        target_date: date,
+    ) -> None:
+        now = utc_now_text()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO invalid_identifiers(
+                    dataset, identifier, source_fingerprint, endpoint,
+                    error_code, error_message, first_failed_at, last_failed_at,
+                    last_target_date, failure_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(dataset, identifier) DO UPDATE SET
+                    source_fingerprint=excluded.source_fingerprint,
+                    endpoint=excluded.endpoint,
+                    error_code=excluded.error_code,
+                    error_message=excluded.error_message,
+                    last_failed_at=excluded.last_failed_at,
+                    last_target_date=excluded.last_target_date,
+                    failure_count=invalid_identifiers.failure_count + 1
+                """,
+                (
+                    dataset,
+                    identifier,
+                    source_fingerprint,
+                    endpoint,
+                    error_code,
+                    error_message,
+                    now,
+                    now,
+                    target_date.isoformat(),
+                ),
+            )
+
+    def clear_invalid_identifier(self, dataset: str, identifier: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM invalid_identifiers WHERE dataset=? AND identifier=?",
+                (dataset, identifier),
+            )
+
+    def note_invalid_identifier_skipped(
+        self,
+        dataset: str,
+        identifier: str,
+        target_date: date,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE invalid_identifiers
+                SET last_skipped_at=?, last_skipped_target_date=?, skip_count=skip_count + 1
+                WHERE dataset=? AND identifier=?
+                """,
+                (utc_now_text(), target_date.isoformat(), dataset, identifier),
+            )
+
+    def invalid_identifier_summary(self) -> list[dict[str, object]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT dataset, identifier, endpoint, error_code, error_message,
+                       first_failed_at, last_failed_at, last_target_date, failure_count,
+                       last_skipped_at, last_skipped_target_date, skip_count
+                FROM invalid_identifiers
+                ORDER BY dataset, identifier
+                """
             ).fetchall()
         return [dict(row) for row in rows]
 

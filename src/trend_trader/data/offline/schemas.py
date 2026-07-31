@@ -428,6 +428,35 @@ def price_candle_frame(
     return _frame(normalized, INDEX_CANDLE_SCHEMA if is_index else PRICE_CANDLE_SCHEMA)
 
 
+def candle_frame(
+    rows: Iterable[list[object]],
+    *,
+    instrument_id: str,
+) -> pl.DataFrame:
+    return _frame(
+        [
+            {
+                "venue": "OKX",
+                "instrument_id": instrument_id,
+                "instrument_type": instrument_type(instrument_id),
+                "bar_type": "1m",
+                "timestamp": row[0],
+                "open": row[1],
+                "high": row[2],
+                "low": row[3],
+                "close": row[4],
+                "volume": row[5],
+                "volume_ccy": row[6],
+                "volume_quote": row[7],
+                "confirm": row[8] if len(row) > 8 else 1,
+            }
+            for row in rows
+            if len(row) >= 8
+        ],
+        CANDLE_SCHEMA,
+    )
+
+
 def aggregate_oi_frame(
     rows: Iterable[list[object]],
     *,

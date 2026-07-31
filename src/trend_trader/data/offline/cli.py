@@ -39,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("status")
     subparsers.add_parser("availability")
+    subparsers.add_parser("invalid-identifiers")
     subparsers.add_parser("notify")
     return parser
 
@@ -60,6 +61,15 @@ def main(argv: list[str] | None = None) -> int:
             "observed": synchronizer.catalog.availability_summary(),
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "invalid-identifiers":
+        print(
+            json.dumps(
+                synchronizer.catalog.invalid_identifier_summary(),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 0
     if args.command == "notify":
         return min(send_pending_notifications(synchronizer.catalog), 1)
