@@ -2,6 +2,22 @@
 
 基于 `uv` 和 `nautilus-trader` 的可扩展趋势交易项目，面向多交易所设计，当前首先支持 OKX。
 
+## Binance 全永续离线数据
+
+下载 Binance USDⓈ-M 与 COIN-M 的全部当前/历史永续合约数据，并保存为统一的
+小时级 Parquet 离线结构：
+
+```bash
+# 先统计官方归档数量和压缩包总容量
+uv run trend-trader-binance-download plan
+
+# 默认 64 路下载、按 CPU 核数并行转换
+uv run trend-trader-binance-download sync
+```
+
+完整目录、字段口径、并发参数和小范围验证方法见
+[`docs/binance_offline_download.md`](docs/binance_offline_download.md)。
+
 ## 结构
 
 - `src/trend_trader/data/okx_candles.py`：下载 OKX 合约 K 线、清洗、保存 Parquet。
